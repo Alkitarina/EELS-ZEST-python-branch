@@ -1,0 +1,44 @@
+# Local environments, caches and temporary work
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.tmp_*/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# Local credentials and machine configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# Research data, generated results, logs and archives
+runtime/
+data/
+datasets/
+uploads/
+outputs/
+reference/*
+!reference/README.md
+*.mat
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.dm3
+*.dm4
+*.zip
+*.gz
+*.log
+*.pid
+Thumbs.db
+.DS_Store

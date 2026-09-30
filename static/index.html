@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light"><title>EELS-ZEST Parallel · 光谱工作台</title>
+  <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css?v=0.3.0">
+  <script defer src="/static/vendor/plotly.min.js"></script>
+  <script defer src="/static/app.js?v=0.3.1"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="EELS-ZEST 首页"><img src="/static/mark.svg" alt=""><span>EELS<span class="brand-light">-ZEST</span><small>SPECTROSCOPY WORKBENCH</small></span></a>
+    <div class="top-right"><span class="version">CPU 并行版 · 0.3.1</span><span id="connection" class="status"><i></i>连接中</span></div>
+  </header>
+  <main>
+    <div class="page-heading"><div><p class="eyebrow">FROM SPECTRUM TO TEMPERATURE</p><h1>让每条光谱，清晰可见。</h1><p class="subtitle">动态分条，逐谱求解。保留串行对照与全图空间约束。</p></div><button class="btn secondary" id="open-import"><span class="plus">＋</span> 导入数据</button></div>
+    <nav class="steps" aria-label="分析流程"><button data-scroll="data-card"><b>01</b><span>数据与预处理<small>MAT / NPZ · ZLP · PCA</small></span></button><span class="step-arrow">→</span><button data-scroll="fit-card"><b>02</b><span>两阶段拟合<small>Pearson · Sparse modes</small></span></button><span class="step-arrow">→</span><button data-scroll="spectrum-card"><b>03</b><span>诊断与测温<small>Spectra · Maps · Export</small></span></button></nav>
+    <div id="notice" class="notice hidden" role="status"><span></span><button aria-label="关闭提示">×</button></div>
+    <section class="metrics-row" aria-label="数据概览">
+      <div class="metric"><span>空间像素</span><strong id="pixel-count">—</strong><small id="spatial-shape">导入光谱图像以开始</small></div>
+      <div class="metric"><span>能量通道</span><strong id="channel-count">—</strong><small id="energy-step">meV / channel</small></div>
+      <div class="metric"><span>能量范围</span><strong class="range-value" id="energy-range">—</strong><small>meV</small></div>
+      <div class="metric engine-card"><span><i class="chip-icon">▦</i> 计算设备</span><strong id="device-name">检测中…</strong><small id="device-detail">双精度 · Float64</small></div>
+    </section>
+    <div class="workspace">
+      <div class="canvas-column">
+        <section class="card" id="image-card">
+          <div class="card-head"><div><p class="eyebrow">SPATIAL VIEW</p><h2>光谱图像 <span class="pill" id="dataset-pill">未载入</span></h2></div><select id="map-select" aria-label="显示的空间图"><option value="intensity">积分强度</option></select></div>
+          <div class="image-body"><div class="plot-frame heatmap-frame"><div id="heatmap"></div><div class="empty-overlay" id="map-empty"><div class="empty-grid">▦</div><strong>从一份光谱图像开始</strong><p>支持原版 EELS 类对象 MAT 文件<br>或包含 data / ene 的 MAT、NPZ</p><button class="btn primary" id="load-reference">载入参考数据</button><span class="micro">所有计算与数据均保留在本机</span></div></div>
+            <div class="selection-panel"><p class="eyebrow">SELECTED PIXEL</p><h3 id="selected-label">Y 01 / X 01</h3><p>点击热图选择像素，查看对应光谱与拟合结果。</p><div class="coordinate-inputs"><label>Y<input id="pixel-y" type="number" min="1" value="1"></label><label>X<input id="pixel-x" type="number" min="1" value="1"></label></div><button class="btn secondary wide" id="jump-pixel">定位像素</button><div class="selection-divider"></div><div class="mini-stat"><span>温度</span><b id="pixel-temp">— <small>K</small></b></div><div class="mini-stat"><span>扫描谷宽</span><b id="pixel-unc">— <small>K</small></b></div><div class="mini-stat"><span>拟合 R²</span><b id="pixel-r2">—</b></div><div class="mini-stat"><span>可靠度</span><b id="pixel-rel">—</b></div><p id="pixel-result-note" class="micro">选中像素尚无拟合结果</p></div>
+          </div><div class="card-foot"><span class="dot blue"></span><span id="map-caption">积分强度 · 点击选点 · 滚轮缩放</span><span class="right-tag">坐标从 1 开始</span></div>
+        </section>
+        <section class="card" id="spectrum-card">
+          <div class="card-head"><div><p class="eyebrow">SPECTRAL DIAGNOSTICS</p><h2>像素光谱</h2></div><div class="segmented" id="scale-switch"><button class="active" data-scale="linear">线性</button><button data-scale="log">对数</button></div></div>
+          <div class="tabs" id="plot-tabs"><button class="active" data-view="spectrum">谱线分解</button><button data-view="residual">残差</button><button data-view="modes">振动模态</button><button data-view="temperature">温度扫描</button><button data-view="attention">Attention</button></div>
+          <div id="spectrum" class="spectrum-plot"></div><div class="card-foot"><span id="spectrum-caption">导入数据后显示原始光谱</span><button id="download-plot" class="text-btn">导出图像 ↗</button></div>
+        </section>
+        <section class="card jobs-card"><div class="card-head"><div><p class="eyebrow">LOCAL RUNS</p><h2>计算记录</h2></div><button class="text-btn" id="refresh-jobs">刷新 ↻</button></div><div id="jobs-list" class="jobs-list"><div class="muted padded">运行结果将保存在这里。</div></div></section>
+      </div>
+      <aside class="controls-column">
+        <section class="card controls" id="data-card"><div class="section-number">01</div><h2>数据与预处理</h2><label class="field-label" for="dataset-select">当前数据</label><select id="dataset-select"><option value="">尚未载入数据</option></select><p class="file-info" id="file-info">导入 .mat / .npz 文件开始分析</p><div class="history-chips" id="preprocess-history"></div>
+          <div class="divider"></div><label class="check-row"><input type="checkbox" id="align" checked><span>ZLP 对齐<small>零损峰定位与线性插值</small></span></label><div class="form-row"><label>SVD/PCA rank<input id="svd-rank" type="number" min="0" max="512" value="12"></label><label>谱线平滑窗口<input id="smooth-points" type="number" min="1" max="101" value="1"></label></div><p class="micro">rank 0 跳过降噪；窗口 1 保留原谱线。</p><button class="btn secondary wide" id="preprocess">应用预处理</button>
+        </section>
+        <section class="card controls" id="fit-card"><div class="section-number">02</div><h2>拟合设置</h2><label class="field-label" for="backend">计算后端</label><select id="backend"><option value="cpu">CPU · NumPy / SciPy</option><option value="gpu" disabled>GPU · CUDA 混合计算</option></select><p class="micro" id="backend-note">CPU 双精度求解；支持竖条并行和串行对照。</p>
+          <label class="field-label" for="execution-mode">执行模式</label><select id="execution-mode"><option value="stripes">竖条并行 · 动态领取</option><option value="serial">串行对照 · 原列优先顺序</option></select><div id="parallel-options"><div class="form-row"><label for="parallel-workers">工作进程数<input id="parallel-workers" type="number" min="1" max="61" step="1" value="12"></label><label for="stripe-count">条带数 · 0 自动<input id="stripe-count" type="number" min="0" max="10000" step="1" value="0"></label></div><p class="micro" id="parallel-hint">条带数 0 = 自动，最多为进程数的 3 倍。</p></div><p class="micro" id="execution-note">条内蛇形热启动；全图空间拟合保留跨条带邻域。空闲进程自动领取下一条带。</p><label class="field-label" for="fit-stage">计算阶段</label><select id="fit-stage"><option value="both">Stage 1 + Stage 2 · 分解与测温</option><option value="stage1">仅 Stage 1 · ZLP 与振动分解</option><option value="stage2">继续选中记录的 Stage 2</option></select><label class="field-label" for="scope">计算范围</label><select id="scope"><option value="pixel">当前像素</option><option value="roi">矩形区域 ROI</option><option value="all">整个光谱图像</option></select><div id="roi-fields" class="hidden"><div class="form-row"><label>Y 起<input id="roi-y0" type="number" min="1" value="1"></label><label>Y 止<input id="roi-y1" type="number" min="1" value="4"></label></div><div class="form-row"><label>X 起<input id="roi-x0" type="number" min="1" value="1"></label><label>X 止<input id="roi-x1" type="number" min="1" value="4"></label></div></div><label class="field-label">能量裁剪范围 / meV</label><div class="range-inputs"><input type="number" id="crop-min" value="-250" aria-label="裁剪下限"><span>—</span><input type="number" id="crop-max" value="250" aria-label="裁剪上限"></div>
+          <details class="advanced"><summary>模型与高级参数<span>＋</span></summary><label class="field-label" for="model-type">零损峰模型</label><select id="model-type"><option value="pearson">非对称 Pearson VII</option><option value="pvoigt">非对称 Pseudo-Voigt</option></select><label class="field-label" for="profile">原版迭代方案</label><select id="profile"><option value="v20_fast">默认 · v2.0 两轮方案</option><option value="full">完整 · 三轮方案</option></select><label class="check-row"><input id="hierarchy" type="checkbox" checked><span>聚类模板与空间 ZLP 约束</span></label><label class="check-row"><input id="calibration" type="checkbox" checked><span>原版稀疏模态网格标定</span></label><label class="field-label">温度扫描 / K</label><div class="form-row three"><label>下限<input id="temp-min" type="number" value="80" min="1"></label><label>上限<input id="temp-max" type="number" value="1500" min="1"></label><label>步长<input id="temp-step" type="number" value="20" min="1"></label></div><label class="field-label" for="advanced-json">其他原版参数（JSON）</label><textarea id="advanced-json" rows="4" spellcheck="false" placeholder='{"lambda_pm_l2": 0.0001}'>{}</textarea><p class="micro">保持默认值即可复现迁移的算法配置。</p></details>
+          <button class="btn primary wide run-btn" id="run-fit"><span>▶</span> 开始计算</button><p class="run-estimate" id="run-estimate">计算当前选中的 1 个像素</p>
+        </section>
+        <section class="card controls progress-card" id="progress-card"><div class="progress-title"><h2>任务状态</h2><span class="pill" id="job-status">就绪</span></div><p id="job-message">选择数据和计算范围后即可开始。</p><div class="progress-track"><div id="progress-bar"></div></div><div class="progress-meta"><span id="job-count">—</span><span id="job-elapsed">00:00</span></div><div class="progress-actions"><button id="cancel-job" class="btn danger hidden">停止计算</button><a id="download-result" class="btn secondary hidden" href="#">下载结果 ZIP ↓</a></div><div id="execution-progress" class="execution-progress hidden" aria-live="polite"></div><div id="timing-progress" class="execution-progress hidden"></div><details class="log-details"><summary>运行日志</summary><pre id="job-log">尚无运行记录</pre></details></section>
+        <div class="validation-note"><span>ⓘ</span><p><strong>数值验证提示</strong>模型与目标函数按原版迁移。SciPy 与 MATLAB 的求解轨迹不同，完整温度结果仍有差异；请对照原版验证后用于定量分析。GPU 支持不代表此规模一定更快。</p></div>
+      </aside>
+    </div>
+    <footer><span>EELS-ZEST Parallel · Local scientific workspace</span><span>Python + SciPy + CuPy <i>·</i> 原版 v2.1 算法移植</span></footer>
+  </main>
+  <dialog id="import-dialog"><form id="import-form"><div class="dialog-head"><div><p class="eyebrow">LOAD SPECTRAL DATA</p><h2>导入光谱数据</h2></div><button type="button" class="icon-btn" id="close-import" aria-label="关闭导入窗口">×</button></div><p class="muted">读取本地路径，或从电脑中选择文件。</p><label class="field-label" for="file-path">本地文件完整路径</label><input id="file-path" type="text" placeholder="C:\data\Spectrum Image.mat" autocomplete="off"><button type="submit" class="btn primary wide" id="import-path">读取此文件</button><div class="or-divider"><span>或</span></div><label class="upload-zone">↑<strong>选择 MAT / NPZ 文件</strong><small>支持 EELS 类对象 · 最大 2 GiB</small><input type="file" id="file-upload" accept=".mat,.npz"></label><p id="import-status" class="micro" aria-live="polite"></p></form></dialog>
+</body>
+</html>

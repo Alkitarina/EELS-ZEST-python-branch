@@ -1,0 +1,9 @@
+numpy==2.5.3
+scipy==1.18.1
+fastapi==0.141.1
+uvicorn==0.54.0
+python-multipart==0.0.32
+h5py==3.16.0
+mat-io==1.0.0
+plotly==7.1.0
+threadpoolctl==3.7.0
