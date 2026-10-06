@@ -7,6 +7,7 @@ from .backend import Cancelled
 from . import calibration, hierarchy, stage1, stage2, maps
 from .parallel import DEFAULT_WORKERS
 from .timing import PhaseTimer
+from .acceleration import execution_info
 
 
 def coordinates(shape, scope="pixel", pixel=(0, 0), roi=None):
@@ -57,6 +58,7 @@ def run(
         blas_threads_per_worker=2, traversal="column_major",
         hierarchy_scope="whole_image", worker_pids=[], stripes=[],
         note="单像素直接计算" if execution_mode == "stripes" else "原版串行对照",
+        acceleration=execution_info(backend.device),
     )
     s = defaults(settings)
     n = len(coords)

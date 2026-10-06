@@ -6,6 +6,7 @@ from . import calibration, hierarchy, maps
 from .parallel import ComputePool, vertical_stripes, scheduling_options, DEFAULT_WORKERS
 from .settings import defaults
 from .timing import PhaseTimer
+from .acceleration import execution_info
 
 
 def run(cube, energy, coords, settings, backend, state, progress=None,
@@ -31,6 +32,7 @@ def run(cube, energy, coords, settings, backend, state, progress=None,
         blas_threads_per_worker=1, traversal="vertical_snake",
         hierarchy_scope="whole_image", hierarchy_update="four_color_barriers",
         worker_pids=[], phase_seconds={},
+        acceleration=execution_info(backend.device),
         stripes=[dict(id=st["id"] + 1, columns=[x + 1 for x in st["columns"]],
                       total=len(st["indices"]), done=0, pid=None, status="queued",
                       current_pixel=None, message="等待领取", elapsed_seconds=0.0,

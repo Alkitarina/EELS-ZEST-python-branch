@@ -18,6 +18,7 @@ from .numeric import (
 from .settings import defaults
 from .backend import Backend
 from . import stage1
+from .acceleration import LinearWorkspace, update_hard_columns
 
 
 def attention(r, s):
@@ -308,6 +309,49 @@ def zlp_basis(r, mask, s):
     )
 
 
+class ScanWorkspace:
+    """Fixed scan blocks and bounds; update only temperature-dependent entries."""
+    def __init__(self, basis, settings, zr, ks, ka, y, w, backend):
+        b, xp = backend, backend.xp
+        self.b = b
+        self.nh, self.ns = len(basis["EM_hard"]), len(basis["EM_soft"])
+        nh, ns, nz = self.nh, self.ns, zr["B"].shape[1]
+        nb = nh + 2 * ns
+        self.ks_h, self.ka_h = ks[:, basis["hard_idx"]], ka[:, basis["hard_idx"]]
+        self.ks_s, self.ka_s = ks[:, basis["soft_idx"]], ka[:, basis["soft_idx"]]
+        self.A = xp.column_stack([self.ks_h + self.ka_h,
+                                  self.ks_s, self.ka_s, b.array(zr["B"])])
+        self.hard_fortran = self.ks_h.flags.f_contiguous
+        self.ks_h_native = xp.ascontiguousarray(self.ks_h)
+        self.ka_h_native = xp.ascontiguousarray(self.ka_h)
+        R, rhs = regularization(basis, settings, np.zeros(ns))
+        self.be_weight = settings["stage2_soft_be_weight"]
+        self.be_rows = np.arange(len(R) - ns, len(R)) if ns and self.be_weight > 0 else None
+        if nz:
+            R = np.pad(R, ((0, 0), (0, nz)))
+            Z = np.zeros((nz, nb + nz))
+            Z[:, nb:] = np.diag(np.sqrt(zr["l2"]))
+            R = np.r_[R, Z]
+            rhs = np.r_[rhs, np.zeros(nz)]
+        self.R, self.rhs = b.array(R), b.array(rhs)
+        self.bounds = dict(lb=np.r_[np.zeros(nb), zr["lb"]],
+                           ub=np.r_[np.full(nb, np.inf), zr["ub"]])
+        self.linear = LinearWorkspace(y, w, rhs, nb + nz, b)
+
+    def update(self, qh, qs):
+        b, xp = self.b, self.b.xp
+        if self.A.flags.c_contiguous:
+            update_hard_columns(self.ks_h_native, self.ka_h_native, qh, self.A, b)
+            # Retain the original matrix layout for BLAS diagnostics as well.
+            hard = xp.array(self.A[:, :self.nh], order="F" if self.hard_fortran else "C")
+        else:
+            hard = self.ks_h + self.ka_h * b.array(qh)[None, :]
+            self.A[:, :self.nh] = hard
+        if self.be_rows is not None:
+            self.R[self.be_rows, self.nh + np.arange(self.ns)] = b.array(np.sqrt(self.be_weight) * -qs)
+        return hard
+
+
 def smooth_cost(T, c, s):
     T = col(T)
     c = col(c)
@@ -486,6 +530,17 @@ def solve(r, settings=None, backend=None, progress=None):
         inner_solver="lsqlin",
         tail_overshoot_constraint=s["stage2_scan_tail_overshoot_constraint"],
     )
+    target = y - z
+    work = ScanWorkspace(bas, s, zr, ks, ka, target, w, b)
+    A2, Reg, rhs, bounds = work.A, work.R, work.rhs, work.bounds
+    # Cost reporting stays on NumPy, as before, including in GPU hybrid mode.
+    reg_host = b.host(Reg).copy() if b.device == "gpu" else Reg
+    rhs_host = b.host(rhs)
+    pair_weights = np.clip(
+        bas["hard_pair_score_hard"],
+        np.clip(s["stage2_effective_pair_weight_floor"], 0, 1), 1)
+    weight_mean = max(np.mean(w * w), EPS)
+    attention_weight_mean = max(np.mean(w[mask] ** 2), EPS)
 
     def evaluate(T):
         b.check()
@@ -494,29 +549,21 @@ def solve(r, settings=None, backend=None, progress=None):
             return scanset[T]
         qh = np.exp(-bas["EM_hard"] / max(KB * T, EPS))
         qs = np.exp(-bas["EM_soft"] / max(KB * T, EPS))
-        hardsig = ks[:, hard] + ka[:, hard] * b.array(qh)[None, :]
-        A2 = xp.column_stack([hardsig, ks[:, soft], ka[:, soft], b.array(zr["B"])])
-        Reg, rhs = regularization(bas, s, qs)
-        if nz:
-            Reg = np.pad(Reg, ((0, 0), (0, nz)))
-            Z = np.zeros((nz, nb + nz))
-            Z[:, nb:] = np.diag(np.sqrt(zr["l2"]))
-            Reg = np.r_[Reg, Z]
-            rhs = np.r_[rhs, np.zeros(nz)]
-        bounds = dict(
-            lb=np.r_[np.zeros(nb), zr["lb"]], ub=np.r_[np.full(nb, np.inf), zr["ub"]]
-        )
+        hardsig = work.update(qh, qs)
+        if b.device == "gpu" and work.be_rows is not None:
+            reg_host[work.be_rows, nh + np.arange(ns)] = np.sqrt(work.be_weight) * -qs
         coef, info = stage1.inner(
             A2,
-            y - z,
+            target,
             w,
-            b.array(Reg),
-            b.array(rhs),
+            Reg,
+            rhs,
             e,
             scan_s,
             b,
             bound=bounds,
             l1=False,
+            workspace=work.linear,
         )
         c = b.array(coef)
         delta = zr["B"] @ coef[nb:]
@@ -528,11 +575,11 @@ def solve(r, settings=None, backend=None, progress=None):
         ps[soft] = coef[nh : nh + ns]
         pa[soft] = coef[nh + ns : nb]
         vh = b.host(hardsig @ c[:nh])
-        vs = b.host(ks[:, soft] @ c[nh : nh + ns] + ka[:, soft] @ c[nh + ns : nb])
+        vs = b.host(work.ks_s @ c[nh : nh + ns] + work.ka_s @ c[nh + ns : nb])
         res = model - y
-        data = np.mean((res * w) ** 2) / max(np.mean(w * w), EPS)
-        attcost = np.mean((res[mask] * w[mask]) ** 2) / max(np.mean(w[mask] ** 2), EPS)
-        rr = Reg @ coef - rhs
+        data = np.mean((res * w) ** 2) / weight_mean
+        attcost = np.mean((res[mask] * w[mask]) ** 2) / attention_weight_mean
+        rr = reg_host @ coef - rhs_host
         regcost = np.mean(rr * rr) if len(rr) else 0
         cost = (
             s["stage2_profile_cost_weight"]
@@ -544,11 +591,6 @@ def solve(r, settings=None, backend=None, progress=None):
         )
         log_ratio = np.log(np.maximum(ps[hard], EPS) / np.maximum(pa[hard], EPS))
         prediction = bas["EM_hard"] / max(KB * T, EPS)
-        pair_weights = np.clip(
-            bas["hard_pair_score_hard"],
-            np.clip(s["stage2_effective_pair_weight_floor"], 0, 1),
-            1,
-        )
         good = (
             np.isfinite(log_ratio)
             & np.isfinite(prediction)

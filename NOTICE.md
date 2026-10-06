@@ -12,6 +12,8 @@ scheduling, timing, persistence and interrupted-job status handling.
 - Baseline release: https://github.com/Iridium-191/EELS-ZEST/releases/tag/v2.1.0
 - Adaptation repository: https://github.com/Alkitarina/EELS-ZEST-python-branch
 - Public adaptation preparation date: 2026-09-30
+- Adaptation update (0.4.0): 2026-10-06; optional C++/pybind11 kernels,
+  per-solve caches and buffer reuse, and optimized JSON/gzip persistence.
 
 ## Upstream copyright and license
 
@@ -35,7 +37,7 @@ JavaScript in this application were written for this application.
 
 Plotly.js, bundled at `static/vendor/plotly.min.js`, is Copyright Plotly, Inc.,
 MIT licensed; its license notice is included in the distribution header.
-NumPy, SciPy, FastAPI, CuPy, mat-io and other dependencies retain their respective
+NumPy, SciPy, FastAPI, CuPy, mat-io, pybind11, orjson and other dependencies retain their respective
 licenses in the installed packages. mat-io reads MATLAB MCOS objects;
 MATLAB Engine is not required by the application.
 

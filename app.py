@@ -169,7 +169,10 @@ def checkpoint(job, i, r, timing_phase="checkpoint"):
         r.setdefault("pixel_y", y + 1)
         r.setdefault("pixel_x", x + 1)
     with job_phase(job, timing_phase):
-        save_pixel(job_path(job) / "pixels" / f"{i:06d}.json.gz", r)
+        written = save_pixel(job_path(job) / "pixels" / f"{i:06d}.json.gz", r,
+                             skip_unchanged=timing_phase == "export_pixels")
+    stats = job.setdefault("storage", {"pixel_writes": 0, "unchanged_exports": 0})
+    stats["pixel_writes" if written else "unchanged_exports"] += 1
     job.setdefault("_completed_indices", set()).add(i)
     job["completed_pixels"] = len(job["_completed_indices"])
 
@@ -252,7 +255,8 @@ def finalize(job, state):
             for name in ("settings.json", "hierarchy.json", "maps.npz", "maps.mat"):
                 z.write(folder / name, name)
             for path in sorted((folder / "pixels").glob("*.json.gz")):
-                z.write(path, "pixels/" + path.name)
+                # Pixel files are already gzip-compressed; avoid compressing twice.
+                z.write(path, "pixels/" + path.name, compress_type=zipfile.ZIP_STORED)
     job["timings"] = timer.finish()
     summary_job = public_job(job)
     summary_job.update(
@@ -488,7 +492,7 @@ async def lifespan(app):
     POOL.shutdown(wait=True, cancel_futures=True)
 
 
-app = FastAPI(title="EELS-ZEST Parallel Workbench", version="0.3.1", lifespan=lifespan)
+app = FastAPI(title="EELS-ZEST Parallel Workbench", version="0.4.0", lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"],
@@ -513,7 +517,7 @@ async def value_error(request, exc):
 
 @app.get("/api/health")
 def health():
-    return dict(app="eels-zest-parallel", status="ok", version="0.3.1", hardware=CAPABILITIES)
+    return dict(app="eels-zest-parallel", status="ok", version="0.4.0", hardware=CAPABILITIES)
 
 
 @app.get("/api/config")
@@ -524,7 +528,7 @@ def config():
             reference_available=REFERENCE.is_file(),
             reference_path=str(REFERENCE),
             defaults=defaults(),
-            version="0.3.1",
+            version="0.4.0",
             execution_modes=["stripes", "serial"],
             parallel_workers=DEFAULT_WORKERS,
             max_parallel_workers=MAX_WORKERS,

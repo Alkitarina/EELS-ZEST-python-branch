@@ -7,3 +7,4 @@ h5py==3.16.0
 mat-io==1.0.0
 plotly==7.1.0
 threadpoolctl==3.7.0
+orjson==3.12.0

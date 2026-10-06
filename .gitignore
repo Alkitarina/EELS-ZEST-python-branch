@@ -42,3 +42,16 @@ reference/*
 *.pid
 Thumbs.db
 .DS_Store
+
+# Native build outputs and local benchmark records
+build/
+dist/
+*.pyd
+*.so
+*.dll
+*.obj
+*.o
+*.lib
+*.exp
+*.egg-info/
+docs/*_metrics.json

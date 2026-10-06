@@ -184,6 +184,7 @@ def test_partial_out_of_order_export_and_reload(client, reference):
     app.checkpoint(job, 8, results[8])
     assert job["completed_pixels"] == 2
     app.finalize(job, state)
+    assert job["storage"]["unchanged_exports"] == 2
     path = app.job_path(job)
     with np.load(path / "maps.npz") as archive:
         np.testing.assert_array_equal(archive["pixel_indices"], [3, 8])

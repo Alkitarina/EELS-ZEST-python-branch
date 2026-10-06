@@ -1,4 +1,19 @@
-# 公开发布检查 · 2026-09-30
+# 公开发布检查
+
+## 2026-10-06 · 0.4.0 同步
+
+同步可选 C++/pybind11 Float64 内核、Stage 1/2 缓存与工作区、orjson/gzip 保存链路、构建脚本、依赖、回归测试及说明。原项目来源、作者署名、GPL-3.0-only 和公开副本的数据隔离规则保留。
+
+- 在公开副本中从 `native/kernels.cpp` 成功编译扩展，使用 MSVC 严格浮点选项。编译产物、构建目录及私人测量 JSON 均被 Git 排除。
+- 未构建扩展时，新增加速测试 **9 passed, 9 skipped, 0 failed**；其中 8 项需要可选扩展，1 项需要私人参考样本。
+- 编译扩展后，完整公开 Python 测试 **28 passed, 15 skipped, 0 failed**。15 项跳过均因私人 MATLAB 参考样本未分发，不能计为数值等价性验证通过。
+- JavaScript 网络恢复测试 **7 passed, 0 failed**；JavaScript 与 PowerShell 语法检查通过。
+- Python 测试的三类警告分别是刻意构造 NaN/Inf 的运算提示、Starlette/httpx 弃用提示和 CuPy CUDA_PATH 探测提示。
+- 待提交文本再次接受常见凭据与私人路径扫描。私人数据、运行结果和本机环境不随更新上传；原始性能测量记录仅保留在本地。
+
+测试使用已有 Python 环境；不代表在全新机器上验证了依赖安装，也不构成整图性能或所有输入的科学等价证明。实现范围与限制见 [ACCELERATION_VALIDATION.md](docs/ACCELERATION_VALIDATION.md)。
+
+## 2026-09-30 · 首次公开发布
 
 本仓库由本地 `eels-zest-web-parallel` 的独立公开副本生成。未导入本地历史、私人数据或运行环境。
 

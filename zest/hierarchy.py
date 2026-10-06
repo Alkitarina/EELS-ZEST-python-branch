@@ -630,7 +630,7 @@ def run(cube, e, coords, results, s, b, progress=None, executor=None, on_result=
                 refitted[coords[i]] = True
             elif error is not None:
                 old.setdefault("refit_failures", []).append(error)
-            if on_result:
+            if on_result and (candidate is not None or error is not None):
                 on_result(i, results[i])
 
         if executor is None:

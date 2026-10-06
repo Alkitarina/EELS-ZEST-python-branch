@@ -11,6 +11,8 @@ from scipy.optimize import least_squares
 from .numeric import EPS, KB, col, mov, noise, unit_scale, expit, interp, grid
 from .settings import defaults
 from .backend import Backend
+from .acceleration import ShiftPlan, LinearWorkspace, residual as assembled_residual
+from .regularization import RegularizationPlan
 
 
 def prepare(e, y, s):
@@ -249,36 +251,10 @@ def normalize(k, b):
 
 
 def shift_matrix(e, k, em, b):
-    xp = b.xp
-    e = b.array(e)
-    k = b.array(k)
-    em = b.array(em)
-    n = e.size
-    b.gpu_operations += int(b.device == "gpu")
-    if not em.size:
-        return xp.zeros((n, 0))
-    de = xp.diff(e)
-    step = float(xp.median(de))
-    if (
-        not np.isfinite(step)
-        or step == 0
-        or float(xp.max(xp.abs(de - step))) > max(1e-9, 1e-7 * max(abs(step), EPS))
-    ):
-        M = xp.column_stack([xp.interp(e - d, e, k, left=0, right=0) for d in em])
-    else:
-        # Preserve MATLAB's one-based arithmetic before converting indices.
-        f = (e[:, None] - em[None, :] - e[0]) / step + 1
-        lo = xp.floor(f)
-        alpha = f - lo
-        valid = (lo >= 1) & (lo < n)
-        lo = xp.where(valid, lo, 1).astype(xp.int64) - 1
-        M = xp.where(valid, (1 - alpha) * k[lo] + alpha * k[lo + 1], 0)
-    M = xp.where(xp.isfinite(M) & (M >= 0), M, 0)
-    s = M.sum(axis=0)
-    return M / xp.where(s > 0, s, 1)[None, :]
+    return ShiftPlan(e, em, b).apply(k)
 
 
-def design(e, em, p, s, b, kernel=None):
+def design(e, em, p, s, b, kernel=None, plans=None, out=None):
     xp = b.xp
     n = int(s["num_zlp_components"])
     x = b.array(e) - p["E_shift"]
@@ -299,15 +275,21 @@ def design(e, em, p, s, b, kernel=None):
     else:
         k = kernel
     k = normalize(k, b)
-    ks = shift_matrix(e, k, em, b)
-    ka = shift_matrix(e, k, -col(em), b)
+    ks = plans[0].apply(k) if plans is not None else shift_matrix(e, k, em, b)
+    ka = plans[1].apply(k) if plans is not None else shift_matrix(e, k, -col(em), b)
     layout = dict(
         zlp=np.arange(n),
         pm_s=np.arange(n, n + len(em)),
         pm_a=np.arange(n + len(em), n + 2 * len(em)),
         bg=np.empty(0, dtype=int),
     )
-    return xp.column_stack([z, ks, ka]), layout, z, dict(stokes=ks, anti=ka, base=k)
+    if out is None:
+        out = xp.column_stack([z, ks, ka])
+    else:
+        out[:, :n] = z
+        out[:, n:n + len(em)] = ks
+        out[:, n + len(em):] = ka
+    return out, layout, z, dict(stokes=ks, anti=ka, base=k)
 
 
 def adaptive(e, y, s):
@@ -431,123 +413,23 @@ def guard_profile(e, y, s):
 
 
 def regularization(em, l, T, n, s, A, e, y, b):
-    xp = b.xp
-    ns = len(em)
-    rows = []
-    rhs = []
-    z = l["zlp"]
-    A = b.array(A)
+    rs = dict(s, _tail_profile=tail_profile(e, s))
+    return RegularizationPlan(em, l, n, rs, e, y, b, guard_profile).evaluate(T, A)
 
-    def add(R, w, target=None):
-        rows.append(np.sqrt(w) * R)
-        rhs.append(
-            xp.zeros(R.shape[0]) if target is None else np.sqrt(w) * b.array(target)
-        )
 
-    def blank(nrow):
-        return xp.zeros((nrow, n), dtype=xp.float64)
-
-    if s["lambda_be_soft"] > 0 and ns:
-        R = blank(ns)
-        R[xp.arange(ns), b.xp.asarray(l["pm_a"])] = 1
-        R[xp.arange(ns), b.xp.asarray(l["pm_s"])] = -xp.exp(
-            -b.array(em) / max(KB * T, EPS)
-        )
-        add(R, s["lambda_be_soft"])
-    if s["lambda_pm_smooth"] > 0 and ns >= 3:
-        D = xp.diff(xp.eye(ns), n=2, axis=0)
-        for key in ("pm_s", "pm_a"):
-            R = blank(ns - 2)
-            R[:, l[key]] = D
-            add(R, s["lambda_pm_smooth"])
-    if s["lambda_pm_l2"] > 0 and ns:
-        R = blank(2 * ns)
-        R[:ns, l["pm_s"]] = xp.eye(ns)
-        R[ns:, l["pm_a"]] = xp.eye(ns)
-        add(R, s["lambda_pm_l2"])
-    if s["zlp_wide_component_l2"] > 0:
-        p = z[max(0, min(len(z) - 1, round(s["zlp_wide_component_start_index"]) - 1)) :]
-        R = blank(len(p))
-        R[:, p] = xp.eye(len(p))
-        add(R, s["zlp_wide_component_l2"])
-    a = abs(e)
-    for prefix in ("zlp_signal_guard", "zlp_lowfreq_guard"):
-        if not s[prefix + "_enabled"] or s[prefix + "_weight"] <= 0:
-            continue
-        start = s[prefix + "_start_meV"]
-        end = s[prefix + "_end_meV"]
-        mask = (a >= start) & (a <= end)
-        if end <= start or sum(mask) < 3:
-            continue
-        tw = max(s[prefix + "_taper_meV"], EPS)
-        t = expit((a[mask] - start) / tw) * expit((end - a[mask]) / tw)
-        gp = guard_profile(e, y, s)[mask]
-        if prefix == "zlp_signal_guard":
-            floor = np.clip(s["zlp_signal_guard_tail_floor"], 0, 1)
-            t *= (
-                floor
-                + (1 - floor)
-                * expit(
-                    (s["zlp_signal_guard_tail_release_start_meV"] - a[mask])
-                    / max(s["zlp_signal_guard_tail_release_width_meV"], EPS)
-                )
-            ) * gp
-        else:
-            t *= 0.35 + 0.65 * gp
-        R = blank(sum(mask))
-        R[:, z] = A[mask, :][:, z] * b.array(t)[:, None]
-        add(R, s[prefix + "_weight"])
-    if s["stage1_zlp_core_fartail_enabled"]:
-        cw = max(s["stage1_zlp_core_anchor_width_meV"], EPS)
-        tw = max(0.25 * cw, 1)
-        mask = a <= cw + 3 * tw
-        if s["stage1_zlp_core_anchor_weight"] > 0 and sum(mask) >= 3:
-            t = expit((cw - a[mask]) / tw)
-            R = blank(sum(mask))
-            R[:, z] = A[mask, :][:, z] * b.array(t)[:, None]
-            add(R, s["stage1_zlp_core_anchor_weight"], y[mask] * t)
-        tp, tm = tail_profile(e, s)
-        side = s["stage1_zlp_fartail_anchor_side"]
-        if side in ("gain", "left", "negative"):
-            tm &= e < 0
-        elif side in ("loss", "right", "positive"):
-            tm &= e > 0
-        if s["stage1_zlp_fartail_anchor_weight"] > 0 and sum(tm) >= 4:
-            R = blank(sum(tm))
-            R[:, z] = A[tm, :][:, z] * b.array(tp[tm])[:, None]
-            add(R, s["stage1_zlp_fartail_anchor_weight"], y[tm] * tp[tm])
-        if (
-            s["stage1_zlp_gain_tail_prior_enabled"]
-            and s["stage1_zlp_gain_tail_prior_weight"] > 0
-        ):
-            start = s["stage1_zlp_fartail_start_meV"]
-            end = s["stage1_zlp_fartail_end_meV"]
-            end = float(end) if np.size(end) and np.isfinite(end) else max(a)
-            pos = (e > 0) & (e >= start) & (e <= end)
-            neg = (e < 0) & (-e >= start) & (-e <= end)
-            if sum(pos) >= 3 and sum(neg) >= 3:
-                end = min(max(e[pos]), max(-e[neg]), end)
-                step = max(s["stage1_zlp_gain_tail_pair_step_meV"], EPS)
-                pairs = grid(start, step, end)
-                if len(pairs) < 2:
-                    pairs = np.linspace(start, end, 3)
-                R = blank(len(pairs))
-                tol = max(step, 2 * np.median(abs(np.diff(e))))
-                keep = []
-                for i, energy in enumerate(pairs):
-                    ip = np.argmin(abs(e - energy))
-                    im = np.argmin(abs(e + energy))
-                    if abs(e[ip] - energy) <= tol and abs(e[im] + energy) <= tol:
-                        R[i, z] = (
-                            A[im, z]
-                            - max(s["stage1_zlp_gain_tail_prior_ratio"], 1) * A[ip, z]
-                        )
-                        keep.append(i)
-                if keep:
-                    add(R[keep], s["stage1_zlp_gain_tail_prior_weight"])
-    return (
-        (xp.concatenate(rows), xp.concatenate(rhs)) if rows else (blank(0), xp.zeros(0))
-    )
+class DecodeContext:
+    """Immutable inputs and mutable scratch buffers private to one fit round."""
+    def __init__(self, e, y, em, s, b):
+        self.settings = adaptive(e, y, s)
+        self.weights = weights(e, y, self.settings)
+        self.plans = (ShiftPlan(e, em, b), ShiftPlan(e, -col(em), b))
+        n, ns = int(s["num_zlp_components"]), len(em)
+        layout = dict(zlp=np.arange(n), pm_s=np.arange(n, n + ns),
+                      pm_a=np.arange(n + ns, n + 2 * ns), bg=np.empty(0, dtype=int))
+        rs = dict(self.settings, _tail_profile=tail_profile(e, self.settings))
+        self.regularization = RegularizationPlan(em, layout, n + 2 * ns, rs, e, y, b, guard_profile)
+        self.A = b.xp.empty((len(e), n + 2 * ns), dtype=b.xp.float64)
+        self.linear = LinearWorkspace(y, self.weights, self.regularization.rhs, n + 2 * ns, b)
 
 
 def tail_constraints(A, y, e, s):
@@ -562,10 +444,13 @@ def tail_constraints(A, y, e, s):
     return A[mask], np.maximum(y[mask] + margin, margin)
 
 
-def inner(A, y, w, R, r0, e, s, b, layout=None, bound=None, l1=True):
+def inner(A, y, w, R, r0, e, s, b, layout=None, bound=None, l1=True, workspace=None):
     xp = b.xp
-    C = xp.concatenate([A * b.array(w)[:, None], R])
-    d = xp.concatenate([b.array(y * w), r0])
+    if workspace is None:
+        C = xp.concatenate([A * b.array(w)[:, None], R])
+        d = xp.concatenate([b.array(y * w), r0])
+    else:
+        C, d = workspace.assemble(A, R)
     G, h = tail_constraints(b.host(A), y, e, s)
     penalty = np.zeros(A.shape[1])
     if l1 and layout is not None:
@@ -610,27 +495,29 @@ def inner(A, y, w, R, r0, e, s, b, layout=None, bound=None, l1=True):
     raise RuntimeError("内层求解全部失败: " + "; ".join(failures))
 
 
-def decode(theta, e, y, em, s, b):
+def decode(theta, e, y, em, s, b, context=None, residual_only=False):
     p = decode_theta(theta, s)
-    fs = adaptive(e, y, s)
-    A, l, z, k = design(e, em, p, fs, b)
-    w = weights(e, y, fs)
-    R, r0 = regularization(em, l, p["T_soft"], A.shape[1], fs, A, e, y, b)
-    coef, info = inner(A, y, w, R, r0, e, fs, b, l)
+    ctx = context or DecodeContext(e, y, em, s, b)
+    fs, w = ctx.settings, ctx.weights
+    A, l, z, k = design(e, em, p, fs, b, plans=ctx.plans, out=ctx.A)
+    R, r0 = ctx.regularization.evaluate(p["T_soft"], A)
+    coef, info = inner(A, y, w, R, r0, e, fs, b, l, workspace=ctx.linear)
     if fs["kernel_mode"] in ("full_zlp", "fitted_zlp"):
         seed = z @ b.array(coef[l["zlp"]])
-        ks = shift_matrix(e, normalize(seed, b), em, b)
-        ka = shift_matrix(e, normalize(seed, b), -em, b)
+        ks = ctx.plans[0].apply(normalize(seed, b))
+        ka = ctx.plans[1].apply(normalize(seed, b))
         A[:, l["pm_s"]] = ks
         A[:, l["pm_a"]] = ka
         k = dict(stokes=ks, anti=ka, base=normalize(seed, b))
-        coef, info2 = inner(A, y, w, R, r0, e, fs, b, l)
+        coef, info2 = inner(A, y, w, R, r0, e, fs, b, l, workspace=ctx.linear)
         info["fitted_zlp_kernel_refit"] = info2
     c = b.array(coef)
     model = b.host(A @ c)
+    res = assembled_residual(model, y, w, R @ c, r0, b)
+    if residual_only:
+        return res
     zlp = b.host(z @ c[l["zlp"]])
     vib = b.host(k["stokes"] @ c[l["pm_s"]] + k["anti"] @ c[l["pm_a"]])
-    res = np.r_[(model - y) * w, b.host(R @ c - r0)]
     return dict(
         params=p,
         coef=coef,
@@ -780,6 +667,7 @@ def solve(e, y, settings=None, backend=None, previous=None, progress=None):
             tail_overshoot_constraint=rs["nonlinear_tail_overshoot_constraint"],
             lambda_pm_l1=0,
         )
+        obj_context = DecodeContext(e, yn, em, obj_s, b)
         count = [0]
         tick = time.perf_counter()
 
@@ -791,11 +679,11 @@ def solve(e, y, settings=None, backend=None, previous=None, progress=None):
         def objective(v):
             b.check()
             t = expand_theta(v)
-            fit = decode(t, e, yn, em, obj_s, b)
+            residual = decode(t, e, yn, em, obj_s, b, context=obj_context, residual_only=True)
             count[0] += 1
             if progress and count[0] % 25 == 0:
                 progress(f"Stage 1 · {rs['name']} · 目标评估 {count[0]}")
-            return np.r_[fit["optimizer_residual"], extra_residual(t, rs)]
+            return np.r_[residual, extra_residual(t, rs)]
 
         def jac(v):
             r = objective(v)
@@ -820,7 +708,7 @@ def solve(e, y, settings=None, backend=None, previous=None, progress=None):
             max_nfev=int(rs["max_nonlinear_iter"]) + 1,
         )
         th = expand_theta(opt.x)
-        fast = decode(th, e, yn, em, obj_s, b)
+        fast = decode(th, e, yn, em, obj_s, b, context=obj_context)
         try:
             cand = decode(th, e, yn, em, rs, b)
             fit = candidate(fast, cand, e, yn, rs)

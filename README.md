@@ -96,13 +96,32 @@ API 在 `/api/fit` 请求顶层使用 `"execution_mode": "stripes"`（默认）�
 
 运行目录覆盖变量为 `ZEST_PARALLEL_RUNTIME`；忽略旧版 `ZEST_RUNTIME`，并拒绝把新运行目录指向旧版 `runtime`。关闭服务会请求工作进程停止并回收共享内存；停止按钮会保存已完成像素，不提供断点自动续跑。
 
+## 缓存与原生内核加速
+
+2026-10-06 起，Stage 1 按像素及优化轮次缓存谱线权重、保护曲线、插值几何和正则结构，复用设计矩阵与线性子问题的输入缓冲区。外层目标评估只构造所需残差，最终结果仍生成完整诊断。Stage 2 缓存 hard/soft 基底、正则结构、上下界及权重，按原顺序逐温度更新依赖温度的项。缓存不跨像素共享。
+
+可选 C++ 扩展通过 pybind11 执行均匀网格核平移、加权矩阵、残差与 hard-BE 列组装，使用 Float64、严格浮点选项、不增加线程；归一化和 BLAS 运算保留原归约路径。**NNLS / BVLS / SLSQP 求解器、约束与容差、有限差分 Jacobian、温度扫描网格及热启动顺序未改变。** 模板和空间重拟合自动复用新的 Stage 1 内核。
+
+`setup.ps1` 默认尝试安装构建依赖并编译本机扩展，需要 MSVC C++ Build Tools；可用 `-SkipNative` 跳过。扩展不可用时仍能使用缓存后的 NumPy 路径。已有环境可单独构建：
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt -r requirements-native.txt
+.venv\Scripts\python.exe -X utf8 tools\build_native.py
+```
+
+`ZEST_CPU_KERNELS=auto`（默认）自动使用已构建扩展；`numpy` 强制 NumPy 缓存路径，`native` 强制 C++ 并在扩展缺失时报错。任务 `execution.acceleration` 记录实际路径。编译产物只适用于对应操作系统、架构和 Python 版本，跨机器应重新构建。GPU 保留 CuPy 路径。
+
+像素结果仍为兼容旧版的 `.json.gz`：原生 JSON 编码保留 NaN / ±Inf 标签和浮点往返值，整块写入 gzip（压缩级别 1），继续采用临时文件原子替换。相较此前压缩级别 9，文件通常稍大；ZIP 直接收录已压缩的像素文件。未接受且无错误的空间重拟合不再重复保存；最终导出逐项比较编码内容，仅跳过完全未变化的文件，支持原地修改的检测。保存仍为同步完成后记为已保存，不改变恢复与取消的语义。任务 `storage` 记录写入和跳过数量。
+
+数值与性能验证见 [ACCELERATION_VALIDATION.md](docs/ACCELERATION_VALIDATION.md)。
+
 ## CPU 与 GPU 的范围
 
 | 部分 | CPU | GPU 混合后端 |
 |---|---|---|
 | MAT 读取、ZLP 对齐、流程控制 | NumPy / Python | CPU |
 | SVD/PCA | SciPy 截断 SVD；退化矩阵使用完整 SVD | CuPy economy SVD 后保留指定 rank |
-| Pearson / Pseudo-Voigt、平移核与设计矩阵 | NumPy | CuPy Float64 |
+| Pearson / Pseudo-Voigt、平移核与设计矩阵 | NumPy + 可选 C++ 内核、每轮缓存 | CuPy Float64、每轮缓存 |
 | 模型矩阵乘法、QP 的矩阵乘法 | CPU | CUDA |
 | 非负/有界最小二乘、一般约束 QP | SciPy | SciPy / CPU |
 | 外层非线性优化与温度扫描调度 | SciPy / Python | SciPy / Python |
