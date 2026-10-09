@@ -75,7 +75,7 @@ test('reconnect refreshes interrupted job state without resubmitting work',async
   const job={id:'job1',kind:'fit',status:'interrupted',dataset_id:'data',request:{stage:'both'},created_at:1};
   const h=harness(async (url,options)=>{calls.push([url,options.method]);return response(url==='/api/jobs'?[job]:{status:'ok'});});
   // Keep the test focused on network/state; chart rendering is independent.
-  h.run('selectJob=async id=>{S.job=S.jobs.find(j=>j.id===id);}; S.initialized=true; S.online=false; S.running="job1"; S.job={id:"job1"};');
+  h.run('selectJob=async id=>{S.job=S.jobs.find(j=>j.id===id);}; S.datasetRoot="data"; S.datasetIds.add("data"); S.initialized=true; S.online=false; S.running="job1"; S.job={id:"job1"};');
   await h.run('poll()');
   assert.equal(h.run('S.running'),null);
   assert.equal(h.run('S.job.status'),'interrupted');

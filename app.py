@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from threadpoolctl import threadpool_limits
 
-from zest import data, pipeline, maps
+from zest import __version__, data, pipeline, maps
 from zest.backend import Backend, Cancelled, hardware
 from zest.numeric import clean_json
 from zest.settings import defaults
@@ -492,7 +492,7 @@ async def lifespan(app):
     POOL.shutdown(wait=True, cancel_futures=True)
 
 
-app = FastAPI(title="EELS-ZEST Parallel Workbench", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="EELS-ZEST Parallel Workbench", version=__version__, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"],
@@ -517,7 +517,7 @@ async def value_error(request, exc):
 
 @app.get("/api/health")
 def health():
-    return dict(app="eels-zest-parallel", status="ok", version="0.4.0", hardware=CAPABILITIES)
+    return dict(app="eels-zest-parallel", status="ok", version=__version__, hardware=CAPABILITIES)
 
 
 @app.get("/api/config")
@@ -528,7 +528,7 @@ def config():
             reference_available=REFERENCE.is_file(),
             reference_path=str(REFERENCE),
             defaults=defaults(),
-            version="0.4.0",
+            version=__version__,
             execution_modes=["stripes", "serial"],
             parallel_workers=DEFAULT_WORKERS,
             max_parallel_workers=MAX_WORKERS,

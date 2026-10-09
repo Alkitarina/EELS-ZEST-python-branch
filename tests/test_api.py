@@ -151,3 +151,16 @@ def test_scheduling_api_validation_and_config(client):
         assert response.status_code == 422, response.text
     valid = FitRequest(dataset_id="example", parallel_workers=14, stripe_count=36)
     assert valid.parallel_workers == 14 and valid.stripe_count == 36
+
+
+def test_release_version_consistent_across_api_and_page(client):
+    from zest import __version__
+
+    assert __version__ == "1.0.0"
+    assert client.get("/api/health").json()["version"] == __version__
+    assert client.get("/api/config").json()["version"] == __version__
+    assert client.get("/openapi.json").json()["info"]["version"] == __version__
+    page = client.get("/").text
+    assert f"CPU 并行版 · {__version__}" in page
+    assert f"/static/style.css?v={__version__}" in page
+    assert f"/static/app.js?v={__version__}" in page

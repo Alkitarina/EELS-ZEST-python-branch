@@ -4,18 +4,20 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light"><title>EELS-ZEST Parallel · 光谱工作台</title>
   <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/style.css?v=0.3.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.0.0">
   <script defer src="/static/vendor/plotly.min.js"></script>
-  <script defer src="/static/app.js?v=0.3.1"></script>
+  <script defer src="/static/app.js?v=1.0.0"></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="EELS-ZEST 首页"><img src="/static/mark.svg" alt=""><span>EELS<span class="brand-light">-ZEST</span><small>SPECTROSCOPY WORKBENCH</small></span></a>
-    <div class="top-right"><span class="version">CPU 并行版 · 0.3.1</span><span id="connection" class="status"><i></i>连接中</span></div>
+    <a class="brand" href="/" aria-label="EELS-ZEST 首页"><img src="/static/mark.svg" alt=""><span>EELS-ZEST<small>SPECTROSCOPY WORKBENCH</small></span></a>
+    <div class="top-right"><span class="version">CPU 并行版 · 1.0.0</span><span id="connection" class="status"><i></i>连接中</span></div>
   </header>
   <main>
-    <div class="page-heading"><div><p class="eyebrow">FROM SPECTRUM TO TEMPERATURE</p><h1>让每条光谱，清晰可见。</h1><p class="subtitle">动态分条，逐谱求解。保留串行对照与全图空间约束。</p></div><button class="btn secondary" id="open-import"><span class="plus">＋</span> 导入数据</button></div>
-    <nav class="steps" aria-label="分析流程"><button data-scroll="data-card"><b>01</b><span>数据与预处理<small>MAT / NPZ · ZLP · PCA</small></span></button><span class="step-arrow">→</span><button data-scroll="fit-card"><b>02</b><span>两阶段拟合<small>Pearson · Sparse modes</small></span></button><span class="step-arrow">→</span><button data-scroll="spectrum-card"><b>03</b><span>诊断与测温<small>Spectra · Maps · Export</small></span></button></nav>
+    <div class="workflow-toolbar">
+      <nav class="steps" aria-label="分析流程"><button data-scroll="data-card"><b>01</b><span>数据与预处理<small>MAT / NPZ · ZLP · PCA</small></span></button><span class="step-arrow">→</span><button data-scroll="fit-card"><b>02</b><span>两阶段拟合<small>Pearson · Sparse modes</small></span></button><span class="step-arrow">→</span><button data-scroll="spectrum-card"><b>03</b><span>诊断与测温<small>Spectra · Maps · Export</small></span></button></nav>
+      <button class="btn secondary" id="open-import"><span class="plus">＋</span> 导入数据</button>
+    </div>
     <div id="notice" class="notice hidden" role="status"><span></span><button aria-label="关闭提示">×</button></div>
     <section class="metrics-row" aria-label="数据概览">
       <div class="metric"><span>空间像素</span><strong id="pixel-count">—</strong><small id="spatial-shape">导入光谱图像以开始</small></div>
@@ -48,10 +50,8 @@
           <button class="btn primary wide run-btn" id="run-fit"><span>▶</span> 开始计算</button><p class="run-estimate" id="run-estimate">计算当前选中的 1 个像素</p>
         </section>
         <section class="card controls progress-card" id="progress-card"><div class="progress-title"><h2>任务状态</h2><span class="pill" id="job-status">就绪</span></div><p id="job-message">选择数据和计算范围后即可开始。</p><div class="progress-track"><div id="progress-bar"></div></div><div class="progress-meta"><span id="job-count">—</span><span id="job-elapsed">00:00</span></div><div class="progress-actions"><button id="cancel-job" class="btn danger hidden">停止计算</button><a id="download-result" class="btn secondary hidden" href="#">下载结果 ZIP ↓</a></div><div id="execution-progress" class="execution-progress hidden" aria-live="polite"></div><div id="timing-progress" class="execution-progress hidden"></div><details class="log-details"><summary>运行日志</summary><pre id="job-log">尚无运行记录</pre></details></section>
-        <div class="validation-note"><span>ⓘ</span><p><strong>数值验证提示</strong>模型与目标函数按原版迁移。SciPy 与 MATLAB 的求解轨迹不同，完整温度结果仍有差异；请对照原版验证后用于定量分析。GPU 支持不代表此规模一定更快。</p></div>
       </aside>
     </div>
-    <footer><span>EELS-ZEST Parallel · Local scientific workspace</span><span>Python + SciPy + CuPy <i>·</i> 原版 v2.1 算法移植</span></footer>
   </main>
   <dialog id="import-dialog"><form id="import-form"><div class="dialog-head"><div><p class="eyebrow">LOAD SPECTRAL DATA</p><h2>导入光谱数据</h2></div><button type="button" class="icon-btn" id="close-import" aria-label="关闭导入窗口">×</button></div><p class="muted">读取本地路径，或从电脑中选择文件。</p><label class="field-label" for="file-path">本地文件完整路径</label><input id="file-path" type="text" placeholder="C:\data\Spectrum Image.mat" autocomplete="off"><button type="submit" class="btn primary wide" id="import-path">读取此文件</button><div class="or-divider"><span>或</span></div><label class="upload-zone">↑<strong>选择 MAT / NPZ 文件</strong><small>支持 EELS 类对象 · 最大 2 GiB</small><input type="file" id="file-upload" accept=".mat,.npz"></label><p id="import-status" class="micro" aria-live="polite"></p></form></dialog>
 </body>

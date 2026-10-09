@@ -1,5 +1,7 @@
 # EELS-ZEST Web Parallel
 
+当前版本：**1.0.0**。界面采用浅彩渐变背景、小圆角与半透明磨砂玻璃分区；阶段计时默认折叠，点击标题可展开明细，进度刷新保留展开状态。
+
 ## 项目来源与改编声明
 
 本项目来源于对 [Iridium-191/EELS-ZEST 发布版本](https://github.com/Iridium-191/EELS-ZEST/releases) 的改写和改编，以 **EELS-ZEST v2.1.0** 的 MATLAB 工作流为基础，使用 Python / NumPy / SciPy 实现选定的谱像分解与测温流程，并增加 Web 界面、CPU 多进程调度、阶段计时及任务恢复状态显示。
@@ -16,7 +18,7 @@ This project is a Python/Web rewrite and adaptation of selected workflows from [
 
 `eels-zest-web` 的独立并行版本，支持 **可配置 CPU 工作进程 + 动态领取竖条 + 条内蛇形热启动**。默认进程数为逻辑线程数与 12 的较小值，自动条带数为所选列数与进程数 × 3 的较小值。界面可切换到原列优先串行模式作对照。仍使用 Python / NumPy / SciPy，目标函数、约束、正则项、温度扫描和 Float64 精度保持原实现。
 
-新版本拥有独立 `.venv`、`runtime` 和端口 **8878**，不读取或覆盖旧版的任务目录。已有的 `eels-zest-web` 可继续在 8877 运行；进行公平速度对照时，应避免两个版本同时计算。
+新版本拥有独立 `.venv`、`runtime` 和端口 **8878**，不读取或覆盖旧版的任务目录。自 2026-10-09 起，Web 版本只维护 parallel 版本；普通 `eels-zest-web` 保留为历史版本，停止维护。串行对照仍可在 parallel 界面中选择。
 
 **当前是数值移植验证版，不应把温度结果视为已与 MATLAB 等价。** 固定参数的设计矩阵与正则矩阵已逐项对照；Stage 2 使用相同 Stage 1 输入得到相同温度。从头拟合时，SciPy 与 MATLAB 的求解轨迹存在明显温度差异。原移植验证记录见 `VALIDATION.md`；本次并行验证见 `PARALLEL_VALIDATION.md`。
 
@@ -61,7 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -CPUOnly
 ## 使用
 
 1. 点击「导入数据」选择本地 MAT / NPZ。支持 MATLAB `EELS` 类对象，也支持含 `data` 和 `ene` 的结构体；默认能量单位为 meV，不会自动猜测或转换 eV。
-2. 按实际流程做 ZLP 对齐和 SVD/PCA。默认 rank 12，可自行修改；这是评估时使用的假设值，不是从数据识别出的最佳 rank。每次预处理产生新数据集，原始数据仍可在下拉框选择。
+2. 按实际流程做 ZLP 对齐和 SVD/PCA。默认 rank 12，可自行修改；这是评估时使用的假设值，不是从数据识别出的最佳 rank。每次预处理产生新数据集，本次导入的原始数据及其预处理版本仍可在下拉框选择。重新导入文件（包括同名文件）后，下拉框、计算记录、任务状态和诊断结果重置为新数据组；刷新页面或自动重连仅恢复当前数据组。旧数据和结果仍保存在磁盘，不会因界面清空而删除。
 3. 点击热图选择像素，先运行一次「Stage 1 + Stage 2」。也可选择矩形区域或整个图像。界面坐标从 1 开始，内部 API 从 0 开始。选择「竖条并行 · 动态领取」并分别填写工作进程数和条带数（0 为自动），或选择「串行对照 · 原列优先顺序」。要复现旧版分条方式，可设 6 进程、6 条带。单像素直接计算；实际条带数不超过所选列数。设置只作用于新任务，并在此浏览器中记忆。
 4. Stage 1 独立结果可从计算记录选中，然后继续 Stage 2。单像素不触发整图标定；多像素按原版条件启用稀疏网格标定和聚类模板；空间 ZLP 重拟合只在整图采样时启用。
 5. 查看谱线、残差、模态、Attention、温度扫描，以及原始温度、有效温度、联合温度等图。联合图保留独立拟合温度，仅按原版用固定有效锚点推断缺失像素，推断像素单独标记。
@@ -149,6 +151,7 @@ MATLAB 的专有优化器改用 SciPy，因此迭代步、终止判断、约束�
 ```powershell
 uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 .venv\Scripts\python.exe -m pytest -q -p no:cacheprovider --basetemp=.tmp_tests
+node --test tests/test_network.cjs tests/test_workspace.cjs
 .venv\Scripts\python.exe -X utf8 tools\validate_native.py
 ```
 
