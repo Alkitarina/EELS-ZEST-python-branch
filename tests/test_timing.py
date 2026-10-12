@@ -42,7 +42,7 @@ def test_interleaved_serial_stages_accumulate_and_failure_closes_phase():
 
 def test_auto_and_manual_stripes_are_independent_of_worker_count():
     coords = [(y, x) for x in range(36) for y in range(2)]
-    for workers, requested, expected in ((12, 0, 36), (2, 0, 6), (12, 6, 6), (2, 100, 36)):
+    for workers, requested, expected in ((12, 0, 32), (2, 0, 2), (12, 6, 6), (2, 100, 36)):
         _, count = scheduling_options(workers, requested)
         stripes = vertical_stripes(coords, count)
         assert len(stripes) == expected

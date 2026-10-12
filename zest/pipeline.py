@@ -5,7 +5,6 @@ import numpy as np
 from .settings import defaults
 from .backend import Cancelled
 from . import calibration, hierarchy, stage1, stage2, maps
-from .parallel import DEFAULT_WORKERS
 from .timing import PhaseTimer
 from .acceleration import execution_info
 
@@ -40,15 +39,19 @@ def run(
     checkpoint=None,
     stage2_only=False,
     execution_mode="serial",
-    workers=DEFAULT_WORKERS,
+    workers=None,
     stripe_count=0,
     timer=None,
+    partition_mode="balanced",
+    grid_rows=1,
+    grid_columns=1,
 ):
     if execution_mode == "stripes" and len(coords) > 1:
         from .parallel_pipeline import run as parallel_run
 
         return parallel_run(cube, energy, coords, settings, backend, state,
-                            progress, checkpoint, stage2_only, workers, stripe_count, timer)
+                            progress, checkpoint, stage2_only, workers, stripe_count, timer,
+                            partition_mode, grid_rows, grid_columns)
     if execution_mode not in ("serial", "stripes"):
         raise ValueError("执行模式必须是 serial 或 stripes")
     owns_timer = timer is None

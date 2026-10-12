@@ -32,8 +32,10 @@ from zest.backend import Backend, Cancelled, hardware
 from zest.numeric import clean_json
 from zest.settings import defaults
 from zest.storage import save_json, save_pixel, load_pixel, restore
-from zest.parallel import DEFAULT_WORKERS, MAX_WORKERS
+from zest.parallel import default_workers, MAX_WORKERS, AUTO_BLOCKS_PER_WORKER, AUTO_BLOCKS_OFFSET
+from zest.partition import PARTITION_MODES, validate_partition
 from zest.timing import PhaseTimer
+from zest.cache import BoundedCache
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = Path(os.environ.get("ZEST_PARALLEL_RUNTIME", ROOT / "runtime")).resolve()
@@ -47,9 +49,23 @@ REFERENCE = Path(
     os.environ.get("ZEST_REFERENCE_PATH", ROOT / "reference" / "example_data.mat")
 ).expanduser().resolve()
 POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zest-compute")
-DATASETS, JOBS = {}, {}
+DATASETS = BoundedCache(3, 512 * 1024**2,
+                        lambda d: d["cube"].nbytes + d["energy"].nbytes)
+INTENSITIES = BoundedCache(8, 32 * 1024**2, lambda a: a.nbytes)
+JOBS = {}
 GUARD = Lock()
 CAPABILITIES = {}
+HARDWARE_GUARD = Lock()
+
+
+def recommended_workers():
+    return default_workers(CAPABILITIES.get("logical_cpus"))
+
+
+def refresh_hardware():
+    global CAPABILITIES
+    with HARDWARE_GUARD:
+        CAPABILITIES = hardware()
 
 
 class ImportRequest(BaseModel):
@@ -68,8 +84,11 @@ class FitRequest(BaseModel):
     dataset_id: str
     device: Literal["cpu", "gpu"] = "cpu"
     execution_mode: Literal["serial", "stripes"] = "stripes"
-    parallel_workers: int = Field(default=DEFAULT_WORKERS, ge=1, le=MAX_WORKERS, strict=True)
+    parallel_workers: int = Field(default_factory=recommended_workers, ge=1, le=MAX_WORKERS, strict=True)
     stripe_count: int = Field(default=0, ge=0, le=10000, strict=True)
+    partition_mode: Literal["balanced", "vertical", "horizontal", "grid"] = "balanced"
+    grid_rows: int = Field(default=1, ge=1, le=10000, strict=True)
+    grid_columns: int = Field(default=1, ge=1, le=10000, strict=True)
     scope: Literal["pixel", "roi", "all"] = "pixel"
     pixel: tuple[int, int] = (0, 0)
     roi: tuple[int, int, int, int] | None = None
@@ -97,22 +116,23 @@ def register_dataset(cube, energy, info):
     d = dict(id=uid, cube=cube, energy=energy, info=info)
     np.savez_compressed(RUNTIME / "datasets" / f"{uid}.npz", data=cube, ene=energy)
     save_json(RUNTIME / "datasets" / f"{uid}.json", dict(id=uid, info=info))
-    DATASETS[uid] = d
+    DATASETS.put(uid, d)
     return d
 
 
 def get_dataset(uid):
-    if uid in DATASETS:
-        return DATASETS[uid]
     if not uid.isalnum():
         raise HTTPException(404, "数据集不存在")
-    path = RUNTIME / "datasets" / f"{uid}.json"
-    if not path.exists():
-        raise HTTPException(404, "数据集不存在，请重新导入")
-    meta = json.loads(path.read_text(encoding="utf-8"))
-    with np.load(path.with_suffix(".npz"), allow_pickle=False) as f:
-        DATASETS[uid] = dict(id=uid, cube=f["data"], energy=f["ene"], info=meta["info"])
-    return DATASETS[uid]
+
+    def load():
+        path = RUNTIME / "datasets" / f"{uid}.json"
+        if not path.exists():
+            raise HTTPException(404, "数据集不存在，请重新导入")
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        with np.load(path.with_suffix(".npz"), allow_pickle=False) as f:
+            return dict(id=uid, cube=f["data"], energy=f["ene"], info=meta["info"])
+
+    return DATASETS.get_or_load(uid, load)
 
 
 def get_job(uid):
@@ -207,11 +227,14 @@ def finalize(job, state):
         coordinates = [p for _, p, _ in entries]
         results = [r for _, _, r in entries]
         folder = job_path(job)
-    job["message"] = "正在生成结果图…"
-    with timer.phase("maps"):
-        state["maps"] = maps.build(
-            state["shape"], coordinates, results, state["settings"], state.get("hierarchy")
-        )
+    # A completed pipeline already built the final maps. Partial/cancelled
+    # pipelines have no final maps and must build from their saved slots here.
+    if not state.get("maps"):
+        job["message"] = "正在生成结果图…"
+        with timer.phase("maps"):
+            state["maps"] = maps.build(
+                state["shape"], coordinates, results, state["settings"], state.get("hierarchy")
+            )
     mp = state["maps"]
     job["message"] = "正在导出 MAT / NPZ 图…"
     with timer.phase("export_maps"):
@@ -276,7 +299,7 @@ def finalize(job, state):
     temp.replace(folder / "result.zip")
 
 
-def execute(job, request):
+def execute(job, request, dataset=None):
     job.update(status="running", started_at=time.time())
     timer = job["_timer"] = PhaseTimer()
     persist_job(job)
@@ -284,7 +307,7 @@ def execute(job, request):
     b = None
     try:
         with timer.phase("prepare"):
-            d = get_dataset(request.dataset_id)
+            d = dataset if dataset is not None else get_dataset(request.dataset_id)
             b = Backend(request.device, job["_cancel"].is_set)
         with threadpool_limits(limits=2):
             if job["kind"] == "preprocess":
@@ -362,6 +385,9 @@ def execute(job, request):
                     execution_mode=request.execution_mode,
                     workers=request.parallel_workers,
                     stripe_count=request.stripe_count,
+                    partition_mode=request.partition_mode,
+                    grid_rows=request.grid_rows,
+                    grid_columns=request.grid_columns,
                     timer=timer,
                 )
         job.update(
@@ -392,6 +418,7 @@ def execute(job, request):
         for stripe in state.get("execution", {}).get("stripes", []):
             if stripe["status"] != "completed":
                 stripe["status"] = outcome
+        export_ok = True
         try:
             if job["kind"] == "fit":
                 job.update(
@@ -402,6 +429,7 @@ def execute(job, request):
                 persist_job(job)
                 finalize(job, state)
         except Exception as exc:
+            export_ok = False
             job.update(
                 _final_status="failed",
                 _final_message="计算结果保留在 runtime，导出失败",
@@ -417,11 +445,18 @@ def execute(job, request):
         job["phase"] = job["status"]
         job["message"] = job.pop("_final_message", message)
         job["elapsed_seconds"] = time.time() - job["started_at"]
+        job["execution"] = state.get("execution", {})
         persist_job(job)
+        if export_ok:
+            # Pixel lookup and Stage 2 already support reloading from disk.
+            # Keep failed exports in RAM in case a checkpoint was not saved.
+            job["_state"] = {}
+            job["_completed_indices"] = set()
+            job["_timer"] = None
 
 
-def submit(kind, request):
-    get_dataset(request.dataset_id)
+def submit(kind, request, dataset=None):
+    d = dataset if dataset is not None else get_dataset(request.dataset_id)
     if request.device == "gpu" and not CAPABILITIES.get("gpu"):
         raise HTTPException(400, CAPABILITIES.get("gpu_error") or "CUDA GPU 不可用")
     with GUARD:
@@ -449,7 +484,9 @@ def submit(kind, request):
         JOBS[uid] = job
         job_path(job).mkdir(parents=True, exist_ok=True)
         persist_job(job)
-        POOL.submit(execute, job, request)
+        # The queued/running task owns this reference even if the LRU evicts it.
+        # In particular, an oversized cube is not reloaded at every boundary.
+        POOL.submit(execute, job, request, d)
     return public_job(job)
 
 
@@ -479,7 +516,7 @@ def restore_job(path):
 
 @asynccontextmanager
 async def lifespan(app):
-    CAPABILITIES.update(hardware())
+    refresh_hardware()
     for path in (RUNTIME / "jobs").glob("*/job.json"):
         try:
             job = restore_job(path)
@@ -522,22 +559,34 @@ def health():
 
 @app.get("/api/config")
 def config():
+    capabilities = CAPABILITIES
     return clean_json(
         dict(
-            hardware=CAPABILITIES,
+            hardware=capabilities,
             reference_available=REFERENCE.is_file(),
             reference_path=str(REFERENCE),
             defaults=defaults(),
             version=__version__,
             execution_modes=["stripes", "serial"],
-            parallel_workers=DEFAULT_WORKERS,
+            parallel_workers=default_workers(capabilities.get("logical_cpus")),
             max_parallel_workers=MAX_WORKERS,
-            logical_cpus=os.cpu_count() or 1,
+            logical_cpus=capabilities.get("logical_cpus", 1),
             stripe_count=0,
-            auto_stripes_per_worker=3,
+            auto_stripes_per_worker=AUTO_BLOCKS_PER_WORKER,
+            auto_stripes_offset=AUTO_BLOCKS_OFFSET,
+            partition_modes=list(PARTITION_MODES),
+            partition_mode="balanced",
+            grid_rows=1,
+            grid_columns=1,
             runtime=str(RUNTIME),
         )
     )
+
+
+@app.post("/api/hardware/refresh")
+def detect_hardware():
+    refresh_hardware()
+    return config()
 
 
 @app.get("/api/datasets")
@@ -598,7 +647,8 @@ def dataset_info(uid: str):
 def preview(uid: str, y: int = 0, x: int = 0):
     d = get_dataset(uid)
     pipeline.coordinates(d["cube"].shape, "pixel", (y, x))
-    intensity = np.nansum(d["cube"], axis=-1)
+    # Registered datasets are immutable and every import/preprocess has a new ID.
+    intensity = INTENSITIES.get_or_load(uid, lambda: np.nansum(d["cube"], axis=-1))
     return clean_json(
         dict(
             dataset=public_dataset(d),
@@ -615,7 +665,7 @@ def preprocess(body: PreprocessRequest):
     d = get_dataset(body.dataset_id)
     if body.rank > min(d["cube"].shape[0] * d["cube"].shape[1], d["cube"].shape[2]):
         raise ValueError("SVD rank 不能超过矩阵最小维度")
-    return submit("preprocess", body)
+    return submit("preprocess", body, d)
 
 
 def validate_settings(changes, energy):
@@ -661,7 +711,9 @@ def fit(body: FitRequest):
     validate_settings(body.settings, d["energy"])
     pipeline.coordinates(d["cube"].shape, body.scope, body.pixel, body.roi)
     if body.execution_mode == "stripes" and body.device != "cpu":
-        raise ValueError("竖条并行使用 CPU；GPU 混合计算请选择串行对照模式")
+        raise ValueError("分块并行使用 CPU；GPU 混合计算请选择串行对照模式")
+    if body.execution_mode == "stripes" and body.stage != "stage2":
+        validate_partition(body.partition_mode, body.grid_rows, body.grid_columns)
     if body.stage == "stage2":
         if not body.source_job_id:
             raise ValueError("请先选择一个已完成的 Stage 1 任务")
@@ -672,7 +724,7 @@ def fit(body: FitRequest):
             raise ValueError("请等待 Stage 1 任务完成")
         if old.get("request", {}).get("stage") != "stage1":
             raise ValueError("请选一个仅运行 Stage 1 的源任务")
-    return submit("fit", body)
+    return submit("fit", body, d)
 
 
 @app.get("/api/jobs")
@@ -700,11 +752,13 @@ def cancel(uid: str):
 @app.get("/api/jobs/{uid}/maps")
 def job_maps(uid: str):
     j = get_job(uid)
+    state = j.get("_state", {})
+    if state.get("maps"):
+        return clean_json(state["maps"])
     path = job_path(j) / "maps.npz"
     if path.exists():
         with np.load(path, allow_pickle=False) as f:
             return clean_json({k: f[k] for k in f.files if k not in ("coords", "pixel_indices")})
-    state = j.get("_state", {})
     entries = completed_entries(state)
     if entries:
         return clean_json(

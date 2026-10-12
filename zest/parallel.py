@@ -1,6 +1,6 @@
 """Spawn-based CPU workers. Share spectra, never share mutable fit results.
 
-One long task owns each vertical stripe during Stage 1. The same pool then
+One long task owns each spatial block during Stage 1. The same pool then
 serves independent refits, with barriers managed by the whole-image hierarchy.
 """
 
@@ -16,40 +16,32 @@ from threadpoolctl import threadpool_limits
 from .backend import Backend, Cancelled
 from . import stage1, stage2
 from .timing import PhaseTimer
+from .partition import partition_blocks
 
 _WORKER = {}
 MAX_WORKERS = 61  # Windows ProcessPoolExecutor limit.
-DEFAULT_WORKERS = min(12, os.cpu_count() or 1)
+AUTO_BLOCKS_PER_WORKER = 3
+AUTO_BLOCKS_OFFSET = 4
+
+
+def default_workers(logical_cpus=None):
+    threads = logical_cpus if logical_cpus is not None else (os.cpu_count() or 1)
+    return min(MAX_WORKERS, max(1, threads - 2))
 
 
 def scheduling_options(workers, stripe_count):
+    if workers is None:
+        workers = default_workers()
     if type(workers) is not int or not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"工作进程数需要为 1–{MAX_WORKERS} 的整数")
     if type(stripe_count) is not int or not 0 <= stripe_count <= 10000:
-        raise ValueError("条带数需要为 0–10000 的整数；0 表示自动")
-    return workers, stripe_count or 3 * workers
+        raise ValueError("块数需要为 0–10000 的整数；0 表示自动")
+    return workers, stripe_count or max(1, AUTO_BLOCKS_PER_WORKER * workers - AUTO_BLOCKS_OFFSET)
 
 
 def vertical_stripes(coords, count=6):
     """Partition whole columns; return canonical indices in snake order."""
-    if count < 1:
-        raise ValueError("条带数必须大于零")
-    points = [tuple(map(int, p)) for p in coords]
-    if len(points) != len(set(points)):
-        raise ValueError("像素坐标不能重复")
-    columns = sorted({x for _, x in points})
-    if not columns:
-        return []
-    lookup = {p: i for i, p in enumerate(points)}
-    rows = {x: sorted(y for y, xx in points if xx == x) for x in columns}
-    stripes = []
-    for number, group in enumerate(np.array_split(columns, min(count, len(columns)))):
-        indices = []
-        for k, x in enumerate(group.tolist()):
-            ys = rows[x] if k % 2 == 0 else rows[x][::-1]
-            indices.extend(lookup[(y, x)] for y in ys)
-        stripes.append(dict(id=number, columns=group.tolist(), indices=indices))
-    return stripes
+    return partition_blocks(coords, count, "vertical")
 
 
 def _close_worker():
@@ -135,6 +127,7 @@ def _fit_stripe(stripe, coords, settings):
             pixel_index=y + x * _WORKER["cube"].shape[0] + 1,
             execution=dict(
                 mode="stripes", stripe_id=stripe_id + 1, worker_pid=os.getpid(),
+                partition_mode=stripe.get("mode", "vertical"),
                 stripe_step=step + 1,
                 warm_start_from=[v + 1 for v in previous_point] if used_seed else None,
                 full_initialization=not used_seed,

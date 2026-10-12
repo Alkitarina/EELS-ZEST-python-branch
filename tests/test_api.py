@@ -141,22 +141,41 @@ def test_scheduling_api_validation_and_config(client):
 
     config = client.get("/api/config").json()
     assert config["parallel_workers"] <= config["logical_cpus"]
+    assert config["parallel_workers"] == max(1, min(61, config["logical_cpus"] - 2))
     assert config["stripe_count"] == 0
     assert config["auto_stripes_per_worker"] == 3
+    assert config["auto_stripes_offset"] == 4
+    assert config["partition_modes"] == ["balanced", "vertical", "horizontal", "grid"]
     for key, value in (("parallel_workers", 0), ("parallel_workers", 62),
                        ("parallel_workers", 1.5), ("parallel_workers", True),
                        ("stripe_count", -1), ("stripe_count", 10001),
-                       ("stripe_count", 2.5)):
+                       ("stripe_count", 2.5), ("partition_mode", "spectral"),
+                       ("grid_rows", 0), ("grid_rows", True),
+                       ("grid_columns", 1.5), ("grid_columns", 10001)):
         response = client.post("/api/fit", json={"dataset_id": "missing", key: value})
         assert response.status_code == 422, response.text
     valid = FitRequest(dataset_id="example", parallel_workers=14, stripe_count=36)
     assert valid.parallel_workers == 14 and valid.stripe_count == 36
 
 
+def test_grid_api_validation_and_forwarding(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "get_dataset", lambda uid: {"cube": np.zeros((7, 17, 20)), "energy": np.arange(20)})
+    monkeypatch.setattr(app, "validate_settings", lambda *_: {})
+    monkeypatch.setattr(app, "submit", lambda kind, body, dataset: body.model_dump())
+    request = dict(dataset_id="fixture", scope="all", partition_mode="grid", grid_rows=3, grid_columns=5)
+    response = client.post("/api/fit", json=request)
+    assert response.status_code == 200
+    assert response.json()["grid_rows"] == 3 and response.json()["grid_columns"] == 5
+    assert response.json()["partition_mode"] == "grid"
+    response = client.post("/api/fit", json={**request, "grid_rows": 101, "grid_columns": 100})
+    assert response.status_code == 400 and "10000" in response.json()["detail"]
+
+
 def test_release_version_consistent_across_api_and_page(client):
     from zest import __version__
 
-    assert __version__ == "1.0.0"
+    assert __version__ == "1.1.0"
     assert client.get("/api/health").json()["version"] == __version__
     assert client.get("/api/config").json()["version"] == __version__
     assert client.get("/openapi.json").json()["info"]["version"] == __version__

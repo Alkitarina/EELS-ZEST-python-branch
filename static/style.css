@@ -86,6 +86,10 @@ main{max-width:1512px;margin:0 auto;padding:31px 36px 20px}
 .metric small{color:#94a3b8;font-size:10px}
 .metric .range-value{font-size:21px;letter-spacing:-.5px;margin-top:14px}
 .engine-card{background:linear-gradient(120deg,#fff,#f0f9ff90)}
+.device-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--muted);font-size:11px}
+.device-heading .text-btn{white-space:nowrap;font-size:10px}
+.engine-card>small{display:block;line-height:1.65;overflow-wrap:anywhere}
+#recommended-workers{float:right;font-size:10px}
 .engine-card strong{font-size:15px;line-height:1.8;margin-top:10px;letter-spacing:-.2px}
 .chip-icon{font-style:normal;color:var(--primary);font-size:13px}
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start}

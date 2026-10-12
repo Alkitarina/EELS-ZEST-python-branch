@@ -1,6 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const S = {config:null,dataset:null,datasets:[],datasetRoot:null,datasetIds:new Set(),scopeRevision:0,selectionRevision:0,preview:null,pixel:[0,0],result:null,maps:{},job:null,running:null,jobs:[],view:'spectrum',scale:'linear',loading:false,polling:false,online:null,initialized:false,nextReconnect:0,nextHealth:0,handled:new Set()};
+const S = {config:null,dataset:null,datasets:[],datasetRoot:null,datasetIds:new Set(),scopeRevision:0,selectionRevision:0,preview:null,pixel:[0,0],result:null,maps:{},job:null,running:null,jobs:[],view:'spectrum',scale:'linear',loading:false,polling:false,online:null,initialized:false,nextReconnect:0,nextHealth:0,handled:new Set(),workerMode:'auto',refreshingHardware:false};
+const PARTITIONS = {balanced:'像素均分',vertical:'竖向条带',horizontal:'横向条带',grid:'二维网格'};
 const NAMES = {intensity:'积分强度',T_raw:'原始拟合温度 / K',T_valid:'数据有效温度 / K',T_joint:'联合温度 / K',T_uncertainty:'温度扫描谷宽 / K',T_joint_uncertainty:'联合温度谷宽 / K',T_inferred_mask:'空间推断像素',T_valid_mask:'有效温度像素',R2:'拟合 R²',NRMSE:'NRMSE',reliability:'可靠度',attention:'Attention 选中比例',cluster:'ZLP 聚类',membership:'聚类归属度',interface:'ZLP 界面分数',template_deviation:'模板偏离',fit_status:'拟合状态',T_joint_shift:'联合温度变化 / K'};
 const STATUS = {queued:'排队中',running:'计算中',completed:'已完成',completed_with_errors:'部分失败',failed:'失败',cancelled:'已停止',interrupted:'已中断'};
 const ACTIVE = ['queued','running'];
@@ -42,7 +43,7 @@ async function api(url,body,timeoutMs){
   return requestJSON(url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},timeoutMs??(body===undefined?15000:0));
 }
 async function action(fn){try{await fn();}catch(error){tell(error.message,true);}}
-function busy(loading){S.loading=loading;const unavailable=S.online!==true||!S.initialized;const oldBackend=S.config&&S.config.max_parallel_workers===undefined;const locked=unavailable||loading||!!S.running||oldBackend;for(const id of ['run-fit','preprocess'])$(id).disabled=locked||!S.dataset;for(const id of ['import-path','load-reference','file-upload','dataset-select'])$(id).disabled=unavailable||loading;$('cancel-job').disabled=unavailable;}
+function busy(loading){S.loading=loading;const unavailable=S.online!==true||!S.initialized;const oldBackend=S.config&&!S.config.partition_modes;const locked=unavailable||loading||!!S.running||oldBackend;for(const id of ['run-fit','preprocess'])$(id).disabled=locked||!S.dataset;for(const id of ['import-path','load-reference','file-upload','dataset-select'])$(id).disabled=unavailable||loading;$('cancel-job').disabled=unavailable;$('refresh-hardware').disabled=unavailable||S.refreshingHardware||oldBackend;$('recommended-workers').disabled=unavailable||oldBackend;}
 function step(id){$(id).scrollIntoView({behavior:'smooth',block:'start'});}
 
 function datasetRoot(id,entries=S.datasets){
@@ -79,8 +80,8 @@ async function refreshDatasets(){
   if(S.dataset&&!entries.some(d=>d.id===S.dataset.id))S.datasets=[S.dataset,...entries];
   syncDatasetOptions();return S.datasets;
 }
-async function selectDataset(id,imported=null){
-  if(!id)return;const selection=++S.selectionRevision;const d=imported||await api(`/api/datasets/${id}`);
+async function selectDataset(id,imported=null,selection=++S.selectionRevision){
+  if(!id)return;const d=imported||await api(`/api/datasets/${id}`);
   if(selection!==S.selectionRevision)return;
   S.datasets=[d,...S.datasets.filter(entry=>entry.id!==id)];const root=datasetRoot(id);
   if(root!==S.datasetRoot){S.datasetRoot=root;resetDatasetWorkspace();}
@@ -136,8 +137,12 @@ function renderHeatmap(){
   const ny=z.length,nx=z[0].length;const layout=baseLayout();layout.margin={t:13,r:48,b:34,l:41};layout.showlegend=false;layout.plot_bgcolor='rgba(255,255,255,.20)';layout.xaxis={...layout.xaxis,title:{text:'X / pixel',font:{size:9}},constrain:'domain',dtick:nx<=8?1:undefined};layout.yaxis={...layout.yaxis,title:{text:'Y / pixel',font:{size:9}},autorange:'reversed',scaleanchor:'x',constrain:'domain',dtick:ny<=8?1:undefined};
   layout.uirevision=`${S.dataset.id}-${choice}`;
   if(S.job?.dataset_id===S.dataset.id && S.job.execution?.stripes?.length>1){
-    const rows=S.job.coords.map(p=>p[0]+1);const y0=Math.min(...rows)-.5,y1=Math.max(...rows)+.5;
-    layout.shapes=S.job.execution.stripes.slice(0,-1).map(st=>({type:'line',x0:st.columns.at(-1)+.5,x1:st.columns.at(-1)+.5,y0,y1,line:{color:'#f8fafc',width:1.5,dash:'dot'}}));
+    const edges=S.job.execution.partition_boundaries;
+    if(edges){layout.shapes=edges.map(([x0,y0,x1,y1])=>({type:'line',x0,y0,x1,y1,line:{color:'#f8fafc',width:1.5,dash:'dot'}}));}
+    else{ // Older saved jobs contain full vertical stripes only.
+      const rows=S.job.coords.map(p=>p[0]+1);const y0=Math.min(...rows)-.5,y1=Math.max(...rows)+.5;
+      layout.shapes=S.job.execution.stripes.slice(0,-1).map(st=>({type:'line',x0:st.columns.at(-1)+.5,x1:st.columns.at(-1)+.5,y0,y1,line:{color:'#f8fafc',width:1.5,dash:'dot'}}));
+    }
   }
   const scale=choice.startsWith('T_')&&choice!=='T_inferred_mask'&&choice!=='T_valid_mask'?'Turbo':[[0,'#10275a'],[.22,'#235eb0'],[.5,'#0ea5b5'],[.77,'#79d5ad'],[1,'#f6f5b0']];
   Plotly.react('heatmap',[{type:'heatmap',z,x:Array.from({length:nx},(_,i)=>i+1),y:Array.from({length:ny},(_,i)=>i+1),colorscale:scale,hoverongaps:false,colorbar:{thickness:8,len:.83,x:1.03,tickfont:{size:9},outlinewidth:0},hovertemplate:'Y %{y} · X %{x}<br>%{z:.5g}<extra></extra>'},{type:'scatter',x:[S.pixel[1]+1],y:[S.pixel[0]+1],mode:'markers',marker:{symbol:'square-open',color:'#fff',size:12,line:{width:2}},hoverinfo:'skip'}],layout,{...chartConfig,displayModeBar:false});
@@ -167,25 +172,60 @@ function renderSpectrum(){
 
 function updateScope(){
   const scope=$('scope').value;$('roi-fields').classList.toggle('hidden',scope!=='roi');
-  let count=1,columns=1;
-  if(scope==='all'){count=S.dataset?.pixels||0;columns=S.dataset?.shape[1]||1;}
-  if(scope==='roi'){columns=Math.max(0,Number($('roi-x1').value)-Number($('roi-x0').value)+1);count=Math.max(0,Number($('roi-y1').value)-Number($('roi-y0').value)+1)*columns;}
+  let count=1,rows=1,columns=1;
+  if(scope==='all'){count=S.dataset?.pixels||0;rows=S.dataset?.shape[0]||1;columns=S.dataset?.shape[1]||1;}
+  if(scope==='roi'){columns=Math.max(0,Number($('roi-x1').value)-Number($('roi-x0').value)+1);rows=Math.max(0,Number($('roi-y1').value)-Number($('roi-y0').value)+1);count=rows*columns;}
   if($('fit-stage').value==='stage2' && S.job?.request?.stage==='stage1'){count=S.job.total_pixels;columns=new Set((S.job.coords||[]).map(p=>p[1])).size;}
-  const parallel=$('execution-mode').value==='stripes';
+  const parallel=$('execution-mode').value==='stripes',stage2=$('fit-stage').value==='stage2',grid=$('partition-mode').value==='grid';
   $('parallel-options').classList.toggle('hidden',!parallel);
   $('parallel-workers').disabled=!parallel||count<=1;
-  $('stripe-count').disabled=!parallel||count<=1||$('fit-stage').value==='stage2';
+  $('partition-mode').disabled=!parallel||count<=1||stage2;
+  $('stripe-count').disabled=!parallel||count<=1||stage2||grid;
+  $('block-count-field').classList.toggle('hidden',grid);
+  $('grid-fields').classList.toggle('hidden',!grid);
+  for(const id of ['grid-rows','grid-columns'])$(id).disabled=!parallel||count<=1||stage2||!grid;
   let options;try{options=parallelOptions();}catch(e){$('run-estimate').textContent=e.message;return;}
-  const workers=Math.min(options.parallel_workers,count),stripes=Math.min(columns,options.stripe_count||3*options.parallel_workers);
-  const detail=count<=1?'单像素直接计算':parallel?($('fit-stage').value==='stage2'?`${workers} 进程扫描温度`:`${workers} 进程 · ${stripes} 条带 · 首轮最多 ${Math.min(workers,stripes)} 条同时计算`):'串行对照 · 列优先热启动';
+  const workers=Math.min(options.parallel_workers,count),mode=options.partition_mode;
+  const target=options.stripe_count||Math.max(1,(S.config?.auto_stripes_per_worker??3)*options.parallel_workers-(S.config?.auto_stripes_offset??4));
+  const blocks=mode==='grid'?Math.min(rows,options.grid_rows)*Math.min(columns,options.grid_columns):Math.min(mode==='vertical'?columns:mode==='horizontal'?rows:count,target);
+  const sizes=mode==='balanced'?`${Math.floor(count/Math.max(1,blocks))}–${Math.ceil(count/Math.max(1,blocks))} 像素/块`:mode==='grid'?`${Math.min(rows,options.grid_rows)} 行 × ${Math.min(columns,options.grid_columns)} 列`:'余数均匀分配';
+  const detail=count<=1?'单像素直接计算':parallel?(stage2?`${workers} 进程扫描温度`:`${workers} 进程 · ${blocks} 块 · ${sizes} · 首轮最多 ${Math.min(workers,blocks)} 块同时计算`):'串行对照 · 列优先热启动';
   $('run-estimate').textContent=`将计算 ${fmt(count,0)} 个像素 · ${detail}`;
-  $('execution-note').textContent=parallel?'空闲进程自动领取下一条带；条内蛇形热启动，全图空间拟合保留跨条带邻域。条带数不超过所选列数。':'保留原程序的列优先遍历、热启动和数值库线程设置，供同一数据集对照。';
+  $('execution-note').textContent=parallel?(stage2?'Stage 2 复用所选记录的 Stage 1，按像素调度，不重新分块。':({balanced:'沿相邻蛇形路径均分像素，每块相差最多 1 个像素，允许切开一列。',vertical:'按完整列切分，块数不超过所选列数，列数不能整除时允许宽度不同。',horizontal:'按完整行切分，块数不超过所选行数，行数不能整除时允许高度不同。',grid:'分别设置沿 Y 的行数和沿 X 的列数，总块数 = 行数 × 列数；超出像素尺寸时缩减，余数均分。'}[mode]+' 空闲进程继续领取；块内相邻热启动，跨块空间邻域保留。改变分块会改变初值路径，温度不保证完全一致。')):'保留原程序的列优先遍历、热启动和数值库线程设置，供同一数据集对照。';
+  $('parallel-hint').textContent=`本机 ${S.config?.logical_cpus||'—'} 个逻辑线程，推荐 ${S.config?.parallel_workers||1} 个进程（线程数 − 2，最少 1，最多 ${S.config?.max_parallel_workers||61}）。当前${S.workerMode==='auto'?'跟随推荐':'为手动值'}；块数 0 = max(1, 3 × 进程数 − 4)，受像素数 / 方向限制。`;
 }
 function parallelOptions(){
-  const parallel_workers=$('parallel-workers').disabled?(S.config?.parallel_workers||12):Number($('parallel-workers').value),stripe_count=$('stripe-count').disabled?0:Number($('stripe-count').value);
+  const parallel_workers=$('parallel-workers').disabled?(S.config?.parallel_workers||1):Number($('parallel-workers').value),stripe_count=$('stripe-count').disabled?0:Number($('stripe-count').value);
+  const partition_mode=$('partition-mode').value||'balanced',grid_rows=$('grid-rows').disabled?1:Number($('grid-rows').value),grid_columns=$('grid-columns').disabled?1:Number($('grid-columns').value);
   if(!Number.isInteger(parallel_workers)||parallel_workers<1||parallel_workers>(S.config?.max_parallel_workers||61))throw new Error('请输入有效的整数工作进程数');
-  if(!Number.isInteger(stripe_count)||stripe_count<0||stripe_count>10000)throw new Error('条带数需为 0–10000 的整数，0 表示自动');
-  return {parallel_workers,stripe_count};
+  if(!Number.isInteger(stripe_count)||stripe_count<0||stripe_count>10000)throw new Error('块数需为 0–10000 的整数，0 表示自动');
+  if(!Object.hasOwn(PARTITIONS,partition_mode))throw new Error('请选择有效的分块方式');
+  if([grid_rows,grid_columns].some(n=>!Number.isInteger(n)||n<1||n>10000)||grid_rows*grid_columns>10000)throw new Error('网格行列数需为正整数，总块数不能超过 10000');
+  return {parallel_workers,stripe_count,partition_mode,grid_rows,grid_columns};
+}
+function saveScheduling(){
+  // Persist the actual controls, including inactive modes, not ignored request defaults.
+  try{parallelOptions();localStorage.setItem('zest.parallel.scheduling',JSON.stringify({worker_mode:S.workerMode,parallel_workers:Number($('parallel-workers').value),stripe_count:Number($('stripe-count').value),partition_mode:$('partition-mode').value,grid_rows:Number($('grid-rows').value),grid_columns:Number($('grid-columns').value)}));}catch{}
+}
+function renderHardware(){
+  const h=S.config.hardware||{};
+  $('device-name').textContent=h.cpu_name||'CPU · NumPy / SciPy';
+  $('device-detail').textContent=`${h.physical_cores?`${h.physical_cores} 核 / `:''}${h.logical_cpus||S.config.logical_cpus||'—'} 线程${h.memory_bytes?` · ${fmt(h.memory_bytes/1024**3,1)} GiB 内存`:''} · Float64`;
+  $('device-gpu').textContent=h.gpu?`${h.gpu_name} · ${fmt(h.gpu_memory_bytes/1024**3,1)} GiB 显存 · CUDA 可用`:`${h.gpu_names?.join(' / ')||'GPU 型号未检出'} · CUDA 不可用`;
+  $('device-gpu').title=h.gpu?'':h.gpu_error||'';
+  $('hardware-status').textContent=(h.detected_at?`检测于 ${new Date(h.detected_at).toLocaleTimeString('zh-CN',{hour12:false})}`:'启动时检测')+(h.detection_warning?` · ${h.detection_warning}`:'');
+  $('backend').options[1].disabled=!h.gpu;
+  if(!h.gpu&&$('backend').value==='gpu'){$('backend').value='cpu';$('backend').onchange?.();}
+}
+async function refreshHardware(){
+  S.refreshingHardware=true;$('refresh-hardware').textContent='检测中…';busy(S.loading);
+  try{
+    S.config=await api('/api/hardware/refresh',{},30000);
+    $('parallel-workers').max=S.config.max_parallel_workers;
+    if(S.workerMode==='auto')$('parallel-workers').value=S.config.parallel_workers;
+    renderHardware();updateScope();saveScheduling();
+    tell(`配置已重新检测：${S.config.logical_cpus} 个逻辑线程，推荐 ${S.config.parallel_workers} 个并行。${S.workerMode==='manual'?'已保留手动并行数。':'已更新默认并行数。'}${S.running?'当前任务配置保持不变。':''}`);
+  }finally{S.refreshingHardware=false;$('refresh-hardware').textContent='重新检测 ↻';busy(S.loading);}
 }
 function settings(){
   const low=Number($('temp-min').value),high=Number($('temp-max').value),step=Number($('temp-step').value);
@@ -207,17 +247,17 @@ function renderJob(j){
   $('job-log').textContent=(j.events||[]).map(e=>`${new Date(e.time*1000).toLocaleTimeString('zh-CN',{hour12:false})}  ${e.message}`).join('\n')||'任务已创建';
   renderExecution(j);renderTimings(j);
 }
-function executionLabel(j){return j.execution?.mode==='stripes'?'竖条并行':j.execution?.mode==='serial'?'串行对照':j.request?.execution_mode==='stripes'?'竖条并行':'串行对照';}
+function executionLabel(j){return j.execution?.mode==='stripes'?(j.execution.traversal==='independent_pixels'?'并行温度扫描':`分块并行 · ${PARTITIONS[j.execution.partition_mode]||'竖向条带'}`):j.execution?.mode==='serial'?'串行对照':j.request?.execution_mode==='stripes'?'分块并行':'串行对照';}
 function renderExecution(j){
   const box=$('execution-progress'),wasOpen=box.querySelector('details')?.open;box.replaceChildren();box.classList.toggle('hidden',j.kind!=='fit');if(j.kind!=='fit')return;
-  const execution=j.execution||{},stripes=execution.stripes||[];const heading=document.createElement('p');heading.className='execution-heading';heading.textContent=`${executionLabel(j)} · ${execution.workers||j.request?.parallel_workers||1} 个工作进程${stripes.length?` · ${stripes.length} 条带`:''}`;box.append(heading);
+  const execution=j.execution||{},stripes=execution.stripes||[];const heading=document.createElement('p');heading.className='execution-heading';heading.textContent=`${executionLabel(j)} · ${execution.workers||j.request?.parallel_workers||1} 个工作进程${stripes.length?` · ${stripes.length} 块`:''}`;box.append(heading);
   const details=document.createElement('details');details.open=wasOpen??stripes.length<=12;
-  const summary=document.createElement('summary');summary.textContent=`条带进度 · ${stripes.filter(s=>s.status==='completed').length}/${stripes.length} 已完成`;details.append(summary);
+  const summary=document.createElement('summary');summary.textContent=`分块进度 · ${stripes.filter(s=>s.status==='completed').length}/${stripes.length} 已完成`;details.append(summary);
   const list=document.createElement('div');list.className='stripe-list';details.append(list);if(stripes.length)box.append(details);
   for(const st of execution.stripes||[]){
     const row=document.createElement('div');row.className='stripe-row';
     const title=document.createElement('div');title.className='stripe-title';
-    const label=document.createElement('span');label.textContent=`条带 ${st.id} · X ${st.columns[0]}–${st.columns.at(-1)}`;
+    const label=document.createElement('span');label.textContent=`块 ${st.id} · ${st.rows?.length?`Y ${st.rows[0]}–${st.rows.at(-1)} / `:''}X ${st.columns[0]}–${st.columns.at(-1)}`;
     const number=document.createElement('span');number.textContent=`${st.done}/${st.total}`;title.append(label,number);
     const track=document.createElement('div');track.className='stripe-track';const bar=document.createElement('div');bar.style.width=`${100*st.done/Math.max(1,st.total)}%`;track.append(bar);
     const detail=document.createElement('small');detail.textContent=st.status==='completed'?`Stage 1 完成 · PID ${st.pid} · ${duration(st.wall_seconds||st.elapsed_seconds)}`:`${st.status==='queued'?'等待领取':STATUS[st.status]||st.status}${st.pid?` · PID ${st.pid}`:''}${st.current_pixel?` · Y${st.current_pixel[0]} X${st.current_pixel[1]}`:''}`;
@@ -255,10 +295,12 @@ function renderJobs(){
   for(const j of S.jobs){const row=document.createElement('div');row.className=`job-row ${S.job?.id===j.id?'selected':''}`;row.tabIndex=0;row.setAttribute('role','button');row.setAttribute('aria-label',`查看任务 ${j.id}`);const icon=document.createElement('div');icon.className='job-icon';icon.textContent=j.kind==='preprocess'?'≋':'∿';const main=document.createElement('div');main.className='job-main';const title=document.createElement('div');title.className='job-name';title.textContent=j.kind==='preprocess'?`ZLP / SVD 预处理 · ${j.device.toUpperCase()}`:`${j.request.stage==='stage1'?'Stage 1':j.request.stage==='stage2'?'Stage 2':'两阶段拟合'} · ${j.total_pixels||1} 像素 · ${executionLabel(j)}`;const meta=document.createElement('div');meta.className='job-meta';meta.textContent=`${new Date(j.created_at*1000).toLocaleString('zh-CN',{hour12:false})} · ${j.id}`;main.append(title,meta);const badge=document.createElement('span');badge.className=`pill ${ACTIVE.includes(j.status)?'busy':j.status==='completed'?'ready':''}`;badge.textContent=STATUS[j.status]||j.status;const t=document.createElement('span');t.className='job-time';t.textContent=duration(j.elapsed_seconds);row.append(icon,main,badge,t);row.onclick=()=>action(()=>selectJob(j.id));row.onkeydown=e=>{if(e.key==='Enter')row.click();};$('jobs-list').append(row);}
 }
 async function selectJob(id){
-  const revision=S.scopeRevision,j=await api(`/api/jobs/${id}`);if(revision!==S.scopeRevision||!jobInScope(j))return;
-  const did=j.output_dataset_id||j.dataset_id;if(did!==S.dataset?.id)await selectDataset(did);
-  if(revision!==S.scopeRevision||did!==S.dataset?.id)return;S.job=j;renderJob(j);renderJobs();updateScope();
-  if(j.kind==='fit'){const maps=await api(`/api/jobs/${id}/maps`);if(revision!==S.scopeRevision||S.job?.id!==id)return;S.maps=maps;renderMapOptions();if(j.coords?.length){const has=j.coords.some(p=>p[0]===S.pixel[0]&&p[1]===S.pixel[1]);if(!has)S.pixel=j.coords[0];}await selectPixel(...S.pixel);}else{S.maps={};S.result=null;renderMapOptions();renderHeatmap();renderSpectrum();renderPixelStats();}
+  // Dataset and job selections share one intent token, including dataset loads
+  // triggered by a job. A late response must never undo a newer selection.
+  const selection=++S.selectionRevision,revision=S.scopeRevision,j=await api(`/api/jobs/${id}`);if(selection!==S.selectionRevision||revision!==S.scopeRevision||!jobInScope(j))return;
+  const did=j.output_dataset_id||j.dataset_id;if(did!==S.dataset?.id)await selectDataset(did,null,selection);
+  if(selection!==S.selectionRevision||revision!==S.scopeRevision||did!==S.dataset?.id)return;S.job=j;renderJob(j);renderJobs();updateScope();
+  if(j.kind==='fit'){const maps=await api(`/api/jobs/${id}/maps`);if(selection!==S.selectionRevision||revision!==S.scopeRevision||S.job?.id!==id)return;S.maps=maps;renderMapOptions();if(j.coords?.length){const has=j.coords.some(p=>p[0]===S.pixel[0]&&p[1]===S.pixel[1]);if(!has)S.pixel=j.coords[0];}await selectPixel(...S.pixel);}else{S.maps={};S.result=null;renderMapOptions();renderHeatmap();renderSpectrum();renderPixelStats();}
 }
 async function poll(){
   if(S.polling||S.loading||(S.online===false&&Date.now()<S.nextReconnect))return;S.polling=true;
@@ -266,6 +308,10 @@ async function poll(){
     if(!S.initialized){const reconnecting=S.online===false;await loadWorkbench();if(reconnecting&&S.config.max_parallel_workers!==undefined)tell('连接已恢复，数据和计算记录已同步。');return;}
     if(S.online===false){
       await api('/api/health',undefined,3000);
+      S.config=await api('/api/config');renderHardware();
+      $('parallel-workers').max=S.config.max_parallel_workers||61;
+      if(S.workerMode==='auto')$('parallel-workers').value=S.config.parallel_workers||1;
+      updateScope();
       await refreshJobs();
       const id=S.jobs.find(j=>j.id===S.running)?.id||S.job?.id;if(id)await selectJob(id);
       tell(S.job?.status==='interrupted'?'连接已恢复。上次任务已中断，已保存像素可查看；未完成计算不会自动续跑。':'连接已恢复，计算记录已同步。',S.job?.status==='interrupted');
@@ -293,8 +339,11 @@ function attachEvents(){
   for(const id of ['pixel-y','pixel-x'])$(id).onkeydown=e=>{if(e.key==='Enter')$('jump-pixel').click();};
   $('map-select').onchange=renderHeatmap;$('scope').onchange=updateScope;for(const id of ['roi-y0','roi-x0','roi-y1','roi-x1'])$(id).oninput=updateScope;
   $('execution-mode').onchange=updateScope;$('fit-stage').onchange=updateScope;
-  for(const id of ['parallel-workers','stripe-count'])$(id).oninput=()=>{updateScope();try{localStorage.setItem('zest.parallel.scheduling',JSON.stringify(parallelOptions()));}catch{}};
-  $('backend').onchange=()=>{const gpu=$('backend').value==='gpu';$('execution-mode').options[0].disabled=gpu;if(gpu)$('execution-mode').value='serial';$('backend-note').textContent=gpu?'GPU 保留原混合计算路径；拟合使用串行模式，预处理仍可用 GPU。':'CPU 双精度求解；支持竖条并行和串行对照。';updateScope();};
+  for(const id of ['parallel-workers','stripe-count','grid-rows','grid-columns'])$(id).oninput=()=>{if(id==='parallel-workers')S.workerMode='manual';updateScope();saveScheduling();};
+  $('partition-mode').onchange=()=>{updateScope();saveScheduling();};
+  $('recommended-workers').onclick=()=>{S.workerMode='auto';$('parallel-workers').value=S.config.parallel_workers;updateScope();saveScheduling();};
+  $('refresh-hardware').onclick=()=>action(refreshHardware);
+  $('backend').onchange=()=>{const gpu=$('backend').value==='gpu';$('execution-mode').options[0].disabled=gpu;if(gpu)$('execution-mode').value='serial';$('backend-note').textContent=gpu?'GPU 保留原混合计算路径；拟合使用串行模式，预处理仍可用 GPU。':'CPU 双精度求解；支持分块并行和串行对照。';updateScope();};
   $('run-fit').onclick=()=>action(startFit);$('preprocess').onclick=()=>action(preprocess);$('cancel-job').onclick=()=>action(async()=>{if(S.job)renderJob(await api(`/api/jobs/${S.job.id}/cancel`,{}));});
   $('refresh-jobs').onclick=()=>action(refreshJobs);
   $('plot-tabs').onclick=e=>{const b=e.target.closest('[data-view]');if(!b)return;S.view=b.dataset.view;for(const item of $('plot-tabs').children)item.classList.toggle('active',item===b);renderSpectrum();};
@@ -305,18 +354,27 @@ function attachEvents(){
 }
 async function loadWorkbench(){
     S.config=await api('/api/config');
-    let scheduling={parallel_workers:S.config.parallel_workers||12,stripe_count:S.config.stripe_count||0};
-    try{const saved=JSON.parse(localStorage.getItem('zest.parallel.scheduling'));if(saved&&Number.isInteger(saved.parallel_workers)&&saved.parallel_workers>=1&&saved.parallel_workers<=(S.config.max_parallel_workers||61)&&Number.isInteger(saved.stripe_count)&&saved.stripe_count>=0&&saved.stripe_count<=10000)scheduling=saved;}catch{}
-    $('parallel-workers').max=S.config.max_parallel_workers||61;$('parallel-workers').value=scheduling.parallel_workers;$('stripe-count').value=scheduling.stripe_count;
-    $('parallel-hint').textContent=`本机 ${S.config.logical_cpus||'—'} 个逻辑线程。条带数 0 = 自动，最多为进程数的 3 倍。`;
+    let scheduling={parallel_workers:S.config.parallel_workers||1,stripe_count:0,partition_mode:'balanced',grid_rows:1,grid_columns:1,worker_mode:'auto'};
+    try{
+      const saved=JSON.parse(localStorage.getItem('zest.parallel.scheduling'));
+      if(saved){
+        if(saved.worker_mode!=='auto'&&Number.isInteger(saved.parallel_workers)&&saved.parallel_workers>=1&&saved.parallel_workers<=(S.config.max_parallel_workers||61)){scheduling.parallel_workers=saved.parallel_workers;scheduling.worker_mode='manual';}
+        if(Number.isInteger(saved.stripe_count)&&saved.stripe_count>=0&&saved.stripe_count<=10000)scheduling.stripe_count=saved.stripe_count;
+        if(Object.hasOwn(PARTITIONS,saved.partition_mode))scheduling.partition_mode=saved.partition_mode;
+        // Preserve explicitly saved legacy stripe counts and their geometry.
+        else if(saved.stripe_count>0)scheduling.partition_mode='vertical';
+        if([saved.grid_rows,saved.grid_columns].every(n=>Number.isInteger(n)&&n>=1&&n<=10000)&&saved.grid_rows*saved.grid_columns<=10000){scheduling.grid_rows=saved.grid_rows;scheduling.grid_columns=saved.grid_columns;}
+      }
+    }catch{}
+    S.workerMode=scheduling.worker_mode;
+    $('parallel-workers').max=S.config.max_parallel_workers||61;$('parallel-workers').value=scheduling.parallel_workers;$('stripe-count').value=scheduling.stripe_count;$('partition-mode').value=scheduling.partition_mode;$('grid-rows').value=scheduling.grid_rows;$('grid-columns').value=scheduling.grid_columns;
     updateScope();
-    const h=S.config.hardware;$('device-name').textContent=h.gpu?h.gpu_name.replace('NVIDIA GeForce ',''):'CPU · NumPy / SciPy';$('device-detail').textContent=h.gpu?`${fmt(h.gpu_memory_bytes/1024**3,1)} GB VRAM · CUDA 混合执行`:'未检测到 CUDA · CPU 可用';$('backend').options[1].disabled=!h.gpu;
-    if(!h.gpu)$('device-detail').title=h.gpu_error||'';
+    renderHardware();
     $('load-reference').classList.toggle('hidden',!S.config.reference_available);$('file-path').value=S.config.reference_available?S.config.reference_path:'';
     const d=S.config.defaults;$('crop-min').value=d.crop_range[0];$('crop-max').value=d.crop_range[1];$('model-type').value=d.zlp_model_type==='pvoigt'?'pvoigt':'pearson';$('temp-min').value=d.stage2_T_grid[0];$('temp-max').value=d.stage2_T_grid.at(-1);$('temp-step').value=d.stage2_T_grid[1]-d.stage2_T_grid[0];
     const entries=await refreshDatasets();const prior=localStorage.getItem('zest.parallel.dataset');if(entries.length)await selectDataset(entries.some(d=>d.id===prior)?prior:entries[0].id);
     await refreshJobs();if(S.jobs.some(j=>j.id===S.running))await selectJob(S.running);else if(S.dataset){const latest=S.jobs.find(j=>j.kind==='fit'&&j.dataset_id===S.dataset.id);if(latest)await selectJob(latest.id);}
-    if(S.config.max_parallel_workers===undefined)tell('代码已更新，后端服务仍是旧版本。请运行 stop_web.ps1，再运行 start_web.ps1 并刷新页面；已有记录可继续查看。',true);
+    if(!S.config.partition_modes)tell('代码已更新，后端服务仍是旧版本。请运行 stop_web.ps1，再运行 start_web.ps1 并刷新页面；已有记录可继续查看。',true);
     S.initialized=true;busy(false);S.nextHealth=Date.now()+10000;
 }
 function init(){

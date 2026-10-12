@@ -23,7 +23,7 @@ function harness(fetch) {
   return {ctx,get,run:code=>vm.runInContext(code,ctx)};
 }
 const response = (payload,status=200) => ({ok:status>=200&&status<300,status,json:async()=>payload});
-const config = {parallel_workers:12,max_parallel_workers:61,hardware:{gpu:false},
+const config = {parallel_workers:12,max_parallel_workers:61,partition_modes:['balanced','vertical','horizontal','grid'],hardware:{gpu:false},
   defaults:{crop_range:[-100,100],zlp_model_type:'pearson',stage2_T_grid:[100,300]}};
 
 test('network failure locks submissions, explains uncertain POST, and never retries it',async()=>{
@@ -73,7 +73,7 @@ test('idle page probes health and detects a backend exit',async()=>{
 test('reconnect refreshes interrupted job state without resubmitting work',async()=>{
   const calls=[];
   const job={id:'job1',kind:'fit',status:'interrupted',dataset_id:'data',request:{stage:'both'},created_at:1};
-  const h=harness(async (url,options)=>{calls.push([url,options.method]);return response(url==='/api/jobs'?[job]:{status:'ok'});});
+  const h=harness(async (url,options)=>{calls.push([url,options.method]);return response(url==='/api/jobs'?[job]:url==='/api/config'?config:{status:'ok'});});
   // Keep the test focused on network/state; chart rendering is independent.
   h.run('selectJob=async id=>{S.job=S.jobs.find(j=>j.id===id);}; S.datasetRoot="data"; S.datasetIds.add("data"); S.initialized=true; S.online=false; S.running="job1"; S.job={id:"job1"};');
   await h.run('poll()');
@@ -81,7 +81,7 @@ test('reconnect refreshes interrupted job state without resubmitting work',async
   assert.equal(h.run('S.job.status'),'interrupted');
   assert.equal(h.run('S.online'),true);
   assert.match(h.get('notice').querySelector().textContent,/不会自动续跑/);
-  assert.deepEqual(calls.map(x=>x[0]),['/api/health','/api/jobs']);
+  assert.deepEqual(calls.map(x=>x[0]),['/api/health','/api/config','/api/jobs']);
   assert.ok(calls.every(x=>x[1]===undefined));
 });
 

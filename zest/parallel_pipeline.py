@@ -1,26 +1,28 @@
-"""Dynamically claimed vertical chains, then one whole-image hierarchy."""
+"""Dynamically claimed spatial blocks, then one whole-image hierarchy."""
 
 import time
 import numpy as np
 from . import calibration, hierarchy, maps
-from .parallel import ComputePool, vertical_stripes, scheduling_options, DEFAULT_WORKERS
+from .parallel import ComputePool, scheduling_options
+from .partition import partition_blocks, partition_boundaries
 from .settings import defaults
 from .timing import PhaseTimer
 from .acceleration import execution_info
 
 
 def run(cube, energy, coords, settings, backend, state, progress=None,
-        checkpoint=None, stage2_only=False, workers=DEFAULT_WORKERS, stripe_count=0,
-        timer=None):
+        checkpoint=None, stage2_only=False, workers=None, stripe_count=0,
+        timer=None, partition_mode="balanced", grid_rows=1, grid_columns=1):
     if backend.device != "cpu":
-        raise ValueError("竖条并行使用 CPU；GPU 混合计算请选择串行模式")
+        raise ValueError("分块并行使用 CPU；GPU 混合计算请选择串行模式")
     s = defaults(settings)
     coords = [tuple(p) for p in coords]
     n = len(coords)
     if not n:
         raise ValueError("没有要计算的像素")
     workers, target_stripes = scheduling_options(workers, stripe_count)
-    stripes = vertical_stripes(coords, target_stripes)
+    stripes = ([] if stage2_only else
+               partition_blocks(coords, target_stripes, partition_mode, grid_rows, grid_columns))
     count = min(workers, n)
     owns_timer = timer is None
     timer = timer or PhaseTimer()
@@ -29,11 +31,20 @@ def run(cube, energy, coords, settings, backend, state, progress=None,
         mode="stripes", requested_workers=workers, workers=count,
         requested_stripes=stripe_count, stripe_count=len(stripes) if not stage2_only else 0,
         scheduling="dynamic_queue", stage1_workers=min(count, len(stripes)),
-        blas_threads_per_worker=1, traversal="vertical_snake",
+        partition_mode=partition_mode if not stage2_only else None,
+        requested_grid_rows=grid_rows, requested_grid_columns=grid_columns,
+        grid_rows=min(grid_rows, len({y for y, _ in coords})) if partition_mode == "grid" and not stage2_only else None,
+        grid_columns=min(grid_columns, len({x for _, x in coords})) if partition_mode == "grid" and not stage2_only else None,
+        partition_boundaries=partition_boundaries(coords, stripes),
+        blas_threads_per_worker=1,
+        traversal=({"balanced": "balanced_vertical_snake", "vertical": "vertical_snake",
+                    "horizontal": "horizontal_snake", "grid": "grid_vertical_snake"}[partition_mode]
+                   if not stage2_only else "independent_pixels"),
         hierarchy_scope="whole_image", hierarchy_update="four_color_barriers",
         worker_pids=[], phase_seconds={},
         acceleration=execution_info(backend.device),
         stripes=[dict(id=st["id"] + 1, columns=[x + 1 for x in st["columns"]],
+                      rows=[y + 1 for y in st["rows"]], bounds=[v + 1 for v in st["bounds"]],
                       total=len(st["indices"]), done=0, pid=None, status="queued",
                       current_pixel=None, message="等待领取", elapsed_seconds=0.0,
                       wall_seconds=0.0)
@@ -100,10 +111,10 @@ def run(cube, energy, coords, settings, backend, state, progress=None,
                 strip = execution["stripes"][message["stripe"]]
                 strip["pid"] = message["pid"]
                 if message["kind"] == "stripe_done":
-                    strip.update(status="completed", current_pixel=None, message="条带完成",
+                    strip.update(status="completed", current_pixel=None, message="分块完成",
                                  wall_seconds=message["wall_seconds"])
                 elif message["kind"] == "stripe_started":
-                    strip.update(status="running", message="已领取条带")
+                    strip.update(status="running", message="已领取分块")
                 elif message["kind"] == "progress":
                     strip.update(status="running", current_pixel=[v + 1 for v in message["point"]],
                                  message=message["message"])
@@ -116,7 +127,7 @@ def run(cube, energy, coords, settings, backend, state, progress=None,
                     strip["elapsed_seconds"] += message["elapsed_seconds"]
                     save(i, r)
                 notify("stage1", done, n,
-                       f"Stage 1 · {count} 进程 / {len(stripes)} 条带 · 完成 {done}/{n} · 条带 {strip['id']}")
+                       f"Stage 1 · {count} 进程 / {len(stripes)} 块 · 完成 {done}/{n} · 块 {strip['id']}")
 
             try:
                 with timer.phase("stage1"):

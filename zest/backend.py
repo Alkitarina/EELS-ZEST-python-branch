@@ -126,7 +126,11 @@ class Backend:
 
 
 def hardware():
+    from datetime import datetime, timezone
+    from .host_info import cpu_info
+
     info = {
+        **cpu_info(),
         "cpu": True,
         "gpu": False,
         "gpu_name": None,
@@ -143,4 +147,5 @@ def hardware():
         )
     except Exception as e:
         info["gpu_error"] = str(e)
+    info["detected_at"] = datetime.now(timezone.utc).isoformat()
     return info

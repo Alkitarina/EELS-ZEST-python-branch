@@ -9,6 +9,7 @@ from threadpoolctl import threadpool_limits
 from zest import hierarchy, pipeline, stage1
 from zest.backend import Backend, Cancelled
 from zest.parallel import ComputePool, vertical_stripes
+from zest.partition import partition_blocks
 from zest.settings import defaults
 from zest.timing import PhaseTimer
 
@@ -56,17 +57,24 @@ def test_vertical_stripes_cover_whole_columns_and_adjacent_snake():
         vertical_stripes([(0, 0), (0, 0)])
 
 
-@pytest.mark.parametrize("workers", [6, 2])
-def test_process_stripes_keep_solver_and_warm_start(small_cube, workers):
+@pytest.mark.parametrize("mode,workers,target", [
+    ("vertical", 6, 6), ("vertical", 2, 6), ("balanced", 2, 5),
+    ("horizontal", 2, 2), ("grid", 2, 6),
+])
+def test_process_stripes_keep_solver_and_warm_start(small_cube, mode, workers, target):
     cube, e, s = small_cube
     coords = pipeline.coordinates(cube.shape, "all")
     state, saved = {}, {}
     pipeline.run(cube, e, coords, s, Backend(), state,
                  checkpoint=lambda i, r: saved.update({i: r}), execution_mode="stripes",
-                 workers=workers, stripe_count=6)
+                 workers=workers, stripe_count=target,
+                 partition_mode=mode, grid_rows=2, grid_columns=3)
+    blocks = partition_blocks(coords, target, mode, 2, 3)
     assert state["execution"]["workers"] == workers
     assert len(state["execution"]["worker_pids"]) == workers
-    assert state["execution"]["stripe_count"] == 6
+    assert state["execution"]["stripe_count"] == len(blocks)
+    assert state["execution"]["partition_mode"] == mode
+    assert state["execution"]["partition_boundaries"]
     assert state["execution"]["scheduling"] == "dynamic_queue"
     if workers < 6:
         assert len({st["pid"] for st in state["execution"]["stripes"]}) < 6
@@ -75,7 +83,7 @@ def test_process_stripes_keep_solver_and_warm_start(small_cube, workers):
     assert all(times[key] > 0 for key in ("pool_setup", "stage1", "pool_shutdown", "maps"))
     assert set(saved) == set(range(len(coords)))
     assert all(st["done"] == st["total"] for st in state["execution"]["stripes"])
-    for strip in vertical_stripes(coords):
+    for strip in blocks:
         previous = None
         for step, i in enumerate(strip["indices"]):
             r = state["results"][i]
@@ -89,7 +97,7 @@ def test_process_stripes_keep_solver_and_warm_start(small_cube, workers):
     # first entire snake chain against direct calls, including its upward leg.
     with threadpool_limits(1):
         previous = None
-        for step, i in enumerate(vertical_stripes(coords)[0]["indices"]):
+        for step, i in enumerate(blocks[0]["indices"]):
             ps = dict(s, stage1_warm_start_skip_coarse=step > 0)
             y, x = coords[i]
             expected = stage1.solve(e, cube[y, x], ps, Backend(), previous=previous)
@@ -238,12 +246,13 @@ def test_parallel_api_stage2_reuse_matches_serial_and_rejects_gpu(client, small_
     initial = finished(response.json()["id"])
     assert initial["completed_pixels"] == initial["total_pixels"] == 6
     assert initial["execution"]["workers"] == 2
-    assert initial["execution"]["stripe_count"] == 6
+    assert initial["execution"]["stripe_count"] == 2
     assert initial["execution"]["requested_stripes"] == 0
     with zipfile.ZipFile(io.BytesIO(client.get(f"/api/jobs/{initial['id']}/download").content)) as archive:
         execution = json.loads(archive.read("execution.json"))
-        assert execution["traversal"] == "vertical_snake"
-        assert len(execution["stripes"]) == 6
+        assert execution["traversal"] == "balanced_vertical_snake"
+        assert len(execution["stripes"]) == 2
+        assert execution["partition_boundaries"]
         timing = json.loads(archive.read("timings.json"))
         assert timing == initial["timings"]
         assert timing["complete"]
